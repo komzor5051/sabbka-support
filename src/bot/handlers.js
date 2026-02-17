@@ -1,28 +1,36 @@
+const { Markup } = require('telegraf');
 const logger = require('../utils/logger');
 const ai = require('../services/ai');
 const db = require('../services/database');
 const { formatSearchResults } = require('../utils/formatters');
 const { authMiddleware } = require('./auth');
 
-// Pending context: stores the last query so the next message saves as answer
-// Map<userId, { query: string, timestamp: number }>
+// Pending context: stores query, generated answer, and mode
+// mode: 'buttons' — waiting for inline button click
+// mode: 'edit'    — waiting for text message (Artem's own answer)
+// Map<userId, { query, answer, results, timestamp, mode }>
 const pendingContext = new Map();
-const PENDING_TIMEOUT_MS = 10 * 60 * 1000; // 10 min — after that, context expires
+const PENDING_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
 
-function setPendingContext(userId, query) {
-  pendingContext.set(userId, { query, timestamp: Date.now() });
+function setPendingContext(userId, data) {
+  pendingContext.set(userId, { ...data, timestamp: Date.now() });
 }
 
 function getPendingContext(userId) {
   const ctx = pendingContext.get(userId);
   if (!ctx) return null;
-  // Expire after 10 min
   if (Date.now() - ctx.timestamp > PENDING_TIMEOUT_MS) {
     pendingContext.delete(userId);
     return null;
   }
   return ctx;
 }
+
+const inlineKeyboard = Markup.inlineKeyboard([
+  Markup.button.callback('✅ Отправить', 'send_answer'),
+  Markup.button.callback('✏️ Редактировать', 'edit_answer'),
+  Markup.button.callback('🔄 Другой вариант', 'regenerate_answer'),
+]);
 
 /**
  * Save Artem's answer as a new KB entry
@@ -68,12 +76,11 @@ async function handleTextQuery(ctx) {
 
   const userId = ctx.from.id;
 
-  // Check if this is an answer to a previous query
+  // Check if this is a text answer (edit mode)
   const pending = getPendingContext(userId);
-  if (pending) {
+  if (pending && pending.mode === 'edit') {
     pendingContext.delete(userId);
 
-    // This text is Artem's answer — save to KB
     await ctx.reply('💾 Сохраняю ответ в базу знаний...');
     const saved = await saveAnswerToKB(pending.query, query);
 
@@ -85,7 +92,9 @@ async function handleTextQuery(ctx) {
     return;
   }
 
-  // Normal query — search KB
+  // New query — clear any old pending context
+  pendingContext.delete(userId);
+
   await ctx.reply('🔍 Ищу в базе знаний...');
 
   try {
@@ -96,9 +105,15 @@ async function handleTextQuery(ctx) {
 
     await ctx.reply(text);
 
-    // Set pending context — next text message will be saved as answer
-    setPendingContext(userId, query);
-    await ctx.reply('💡 Напиши свой ответ — я сохраню его в базу.\nИли задай новый вопрос через /skip');
+    if (answer) {
+      // Store context and show inline buttons
+      setPendingContext(userId, { query, answer, results, mode: 'buttons' });
+      await ctx.reply('Что сделать с ответом?', inlineKeyboard);
+    } else {
+      // No answer generated — go straight to edit mode
+      setPendingContext(userId, { query, answer: null, results, mode: 'edit' });
+      await ctx.reply('💡 В базе нет подходящих кейсов. Напиши свой ответ — я сохраню его.\nИли /skip для нового вопроса.');
+    }
   } catch (err) {
     logger.error('Query handling failed', { error: err.message });
     await ctx.reply('❌ Ошибка при поиске. Попробуй ещё раз.');
@@ -128,9 +143,13 @@ async function handleVoice(ctx) {
 
     await ctx.reply(text);
 
-    // Set pending context
-    setPendingContext(ctx.from.id, transcription);
-    await ctx.reply('💡 Напиши свой ответ — я сохраню его в базу.\nИли задай новый вопрос через /skip');
+    if (answer) {
+      setPendingContext(ctx.from.id, { query: transcription, answer, results, mode: 'buttons' });
+      await ctx.reply('Что сделать с ответом?', inlineKeyboard);
+    } else {
+      setPendingContext(ctx.from.id, { query: transcription, answer: null, results, mode: 'edit' });
+      await ctx.reply('💡 Напиши свой ответ — я сохраню его.\nИли /skip для нового вопроса.');
+    }
   } catch (err) {
     logger.error('Voice handling failed', { error: err.message });
     await ctx.reply('❌ Ошибка при обработке голосового.');
@@ -156,9 +175,13 @@ async function handleForward(ctx) {
 
     await ctx.reply(response);
 
-    // Set pending context
-    setPendingContext(ctx.from.id, text);
-    await ctx.reply('💡 Напиши свой ответ — я сохраню его в базу.\nИли задай новый вопрос через /skip');
+    if (answer) {
+      setPendingContext(ctx.from.id, { query: text, answer, results, mode: 'buttons' });
+      await ctx.reply('Что сделать с ответом?', inlineKeyboard);
+    } else {
+      setPendingContext(ctx.from.id, { query: text, answer: null, results, mode: 'edit' });
+      await ctx.reply('💡 Напиши свой ответ — я сохраню его.\nИли /skip для нового вопроса.');
+    }
   } catch (err) {
     logger.error('Forward handling failed', { error: err.message });
     await ctx.reply('❌ Ошибка при обработке.');
@@ -170,6 +193,67 @@ function setupHandlers(bot) {
   bot.command('skip', authMiddleware, (ctx) => {
     pendingContext.delete(ctx.from.id);
     ctx.reply('⏭ Пропущено. Задавай новый вопрос.');
+  });
+
+  // Inline button: Send — save AI answer to KB as-is
+  bot.action('send_answer', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const pending = getPendingContext(userId);
+
+    if (!pending || !pending.answer) {
+      return ctx.editMessageText('⚠️ Контекст истёк. Задай вопрос заново.');
+    }
+
+    pendingContext.delete(userId);
+    await ctx.editMessageText('💾 Сохраняю ответ в базу знаний...');
+    const saved = await saveAnswerToKB(pending.query, pending.answer);
+
+    if (saved) {
+      await ctx.editMessageText('✅ Ответ сохранён в базу!');
+    } else {
+      await ctx.editMessageText('❌ Не удалось сохранить ответ.');
+    }
+  });
+
+  // Inline button: Edit — switch to text input mode
+  bot.action('edit_answer', async (ctx) => {
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    const pending = getPendingContext(userId);
+
+    if (!pending) {
+      return ctx.editMessageText('⚠️ Контекст истёк. Задай вопрос заново.');
+    }
+
+    // Switch to edit mode — next text message will be saved as answer
+    setPendingContext(userId, { ...pending, mode: 'edit' });
+    await ctx.editMessageText('✏️ Напиши свой вариант ответа — я сохраню его в базу.');
+  });
+
+  // Inline button: Regenerate — re-run AI answer with higher temperature
+  bot.action('regenerate_answer', async (ctx) => {
+    await ctx.answerCbQuery('🔄 Генерирую новый вариант...');
+    const userId = ctx.from.id;
+    const pending = getPendingContext(userId);
+
+    if (!pending) {
+      return ctx.editMessageText('⚠️ Контекст истёк. Задай вопрос заново.');
+    }
+
+    try {
+      const newAnswer = await ai.generateAnswer(pending.query, pending.results, { temperature: 0.8 });
+      if (!newAnswer) {
+        return ctx.editMessageText('⚠️ Не удалось сгенерировать новый вариант.');
+      }
+
+      // Update stored answer
+      setPendingContext(userId, { ...pending, answer: newAnswer, mode: 'buttons' });
+      await ctx.editMessageText(`🔄 Новый вариант:\n\n"${newAnswer}"`, inlineKeyboard);
+    } catch (err) {
+      logger.error('Regenerate failed', { error: err.message });
+      await ctx.editMessageText('❌ Ошибка при генерации. Попробуй ещё раз.', inlineKeyboard);
+    }
   });
 
   // Auth on each handler individually — NOT bot.use() which would block business_messages

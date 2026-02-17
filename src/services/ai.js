@@ -105,7 +105,7 @@ ${fullDialog}`;
   }
 }
 
-async function generateAnswer(query, similarCases) {
+async function generateAnswer(query, similarCases, { temperature = 0.4 } = {}) {
   if (similarCases.length === 0) {
     return null;
   }
@@ -127,7 +127,7 @@ ${casesText}
   return chatCompletion(
     config.openrouter.models.gemini,
     [{ role: 'user', content: prompt }],
-    { temperature: 0.4, maxTokens: 512 }
+    { temperature, maxTokens: 512 }
   );
 }
 
