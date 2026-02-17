@@ -2,8 +2,10 @@ const logger = require('../utils/logger');
 const db = require('../services/database');
 const ai = require('../services/ai');
 const { formatStats, formatModels } = require('../utils/formatters');
+const { authMiddleware } = require('./auth');
 
 function setupCommands(bot, { syncSheets }) {
+  // /start — no auth (public info)
   bot.command('start', (ctx) => {
     ctx.reply(
       '👋 Привет! Я бот базы знаний поддержки Сабка.\n\n' +
@@ -22,7 +24,7 @@ function setupCommands(bot, { syncSheets }) {
     );
   });
 
-  bot.command('stats', async (ctx) => {
+  bot.command('stats', authMiddleware, async (ctx) => {
     try {
       const stats = await db.getStats();
       await ctx.reply(formatStats(stats.total, stats.byCategory, stats.lastSync));
@@ -32,11 +34,11 @@ function setupCommands(bot, { syncSheets }) {
     }
   });
 
-  bot.command('models', (ctx) => {
+  bot.command('models', authMiddleware, (ctx) => {
     ctx.reply(formatModels());
   });
 
-  bot.command('export', async (ctx) => {
+  bot.command('export', authMiddleware, async (ctx) => {
     const args = ctx.message.text.split(' ');
     const limit = parseInt(args[1], 10) || 50;
 
@@ -68,7 +70,7 @@ function setupCommands(bot, { syncSheets }) {
     }
   });
 
-  bot.command('sync_now', async (ctx) => {
+  bot.command('sync_now', authMiddleware, async (ctx) => {
     try {
       await ctx.reply('🔄 Запускаю синхронизацию с Google Sheets...');
       const count = await syncSheets();
@@ -79,7 +81,7 @@ function setupCommands(bot, { syncSheets }) {
     }
   });
 
-  bot.command('add_category', async (ctx) => {
+  bot.command('add_category', authMiddleware, async (ctx) => {
     const text = ctx.message.text.replace('/add_category', '').trim();
     const spaceIdx = text.indexOf(' ');
 
@@ -106,7 +108,7 @@ function setupCommands(bot, { syncSheets }) {
     }
   });
 
-  bot.command('change', async (ctx) => {
+  bot.command('change', authMiddleware, async (ctx) => {
     const rule = ctx.message.text.replace('/change', '').trim();
     if (!rule) {
       return ctx.reply('Формат: /change [правило]\nПример: /change записывай баги по картинкам в баги_картинки');
@@ -126,38 +128,42 @@ function setupCommands(bot, { syncSheets }) {
 
       let processed = 0;
       for (const record of records) {
-        const analysis = await ai.analyzeDialog(record.full_dialog, categories, rules);
+        try {
+          const analysis = await ai.analyzeDialog(record.full_dialog, categories, rules);
 
-        const validCats = categories.map(c => c.name);
-        if (!validCats.includes(analysis.category)) {
-          analysis.category = 'прочее';
-        }
+          const validCats = categories.map(c => c.name);
+          if (!validCats.includes(analysis.category)) {
+            analysis.category = 'прочее';
+          }
 
-        const embedding = await ai.generateEmbedding(
-          `${analysis.summary_problem} ${analysis.summary_solution}`
-        );
+          const embedding = await ai.generateEmbedding(
+            `${analysis.summary_problem} ${analysis.summary_solution}`
+          );
 
-        await db.updateRecord(record.id, {
-          category: analysis.category,
-          summaryProblem: analysis.summary_problem,
-          summarySolution: analysis.summary_solution,
-          embedding,
-        });
+          await db.updateRecord(record.id, {
+            category: analysis.category,
+            summaryProblem: analysis.summary_problem,
+            summarySolution: analysis.summary_solution,
+            embedding,
+          });
 
-        processed++;
-        if (processed % 10 === 0) {
-          await ctx.reply(`🔄 Обработано ${processed}/${records.length}...`);
+          processed++;
+          if (processed % 10 === 0) {
+            await ctx.reply(`🔄 Обработано ${processed}/${records.length}...`);
+          }
+        } catch (err) {
+          logger.error('Failed to recalculate record', { id: record.id, error: err.message });
         }
       }
 
-      await ctx.reply(`✅ Пересчет завершен! Обработано: ${processed} записей.`);
+      await ctx.reply(`✅ Пересчет завершен! Обработано: ${processed}/${records.length} записей.`);
     } catch (err) {
       logger.error('/change failed', { error: err.message });
       await ctx.reply('❌ Ошибка при пересчете.');
     }
   });
 
-  bot.command('recalculate', async (ctx) => {
+  bot.command('recalculate', authMiddleware, async (ctx) => {
     const filterCategory = ctx.message.text.replace('/recalculate', '').trim() || null;
 
     try {
@@ -173,31 +179,35 @@ function setupCommands(bot, { syncSheets }) {
 
       let processed = 0;
       for (const record of records) {
-        const analysis = await ai.analyzeDialog(record.full_dialog, categories, rules);
+        try {
+          const analysis = await ai.analyzeDialog(record.full_dialog, categories, rules);
 
-        const validCats = categories.map(c => c.name);
-        if (!validCats.includes(analysis.category)) {
-          analysis.category = 'прочее';
-        }
+          const validCats = categories.map(c => c.name);
+          if (!validCats.includes(analysis.category)) {
+            analysis.category = 'прочее';
+          }
 
-        const embedding = await ai.generateEmbedding(
-          `${analysis.summary_problem} ${analysis.summary_solution}`
-        );
+          const embedding = await ai.generateEmbedding(
+            `${analysis.summary_problem} ${analysis.summary_solution}`
+          );
 
-        await db.updateRecord(record.id, {
-          category: analysis.category,
-          summaryProblem: analysis.summary_problem,
-          summarySolution: analysis.summary_solution,
-          embedding,
-        });
+          await db.updateRecord(record.id, {
+            category: analysis.category,
+            summaryProblem: analysis.summary_problem,
+            summarySolution: analysis.summary_solution,
+            embedding,
+          });
 
-        processed++;
-        if (processed % 10 === 0) {
-          await ctx.reply(`🔄 Обработано ${processed}/${records.length}...`);
+          processed++;
+          if (processed % 10 === 0) {
+            await ctx.reply(`🔄 Обработано ${processed}/${records.length}...`);
+          }
+        } catch (err) {
+          logger.error('Failed to recalculate record', { id: record.id, error: err.message });
         }
       }
 
-      await ctx.reply(`✅ Пересчет завершён! Обработано: ${processed} записей.`);
+      await ctx.reply(`✅ Пересчет завершён! Обработано: ${processed}/${records.length} записей.`);
     } catch (err) {
       logger.error('/recalculate failed', { error: err.message });
       await ctx.reply('❌ Ошибка при пересчете.');

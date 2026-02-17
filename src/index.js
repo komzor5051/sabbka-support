@@ -42,7 +42,7 @@ async function main() {
   // 5. Graceful shutdown — flush pending dialogs
   const shutdown = async (signal) => {
     logger.info(`Received ${signal}, shutting down...`);
-    dialogTracker.flushAll();
+    await dialogTracker.flushAll();
     bot.stop(signal);
     process.exit(0);
   };

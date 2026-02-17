@@ -43,7 +43,7 @@ class DialogTracker {
     });
   }
 
-  _completeDialog(userId) {
+  async _completeDialog(userId) {
     const dialog = this.dialogs.get(userId);
     if (!dialog || dialog.messages.length === 0) {
       this.dialogs.delete(userId);
@@ -63,7 +63,7 @@ class DialogTracker {
     clearTimeout(dialog.timer);
     this.dialogs.delete(userId);
 
-    this.onDialogComplete({
+    return this.onDialogComplete({
       userId,
       firstMessageId: dialog.firstMessageId,
       fullDialog,
@@ -71,11 +71,9 @@ class DialogTracker {
     });
   }
 
-  flushAll() {
+  async flushAll() {
     const userIds = [...this.dialogs.keys()];
-    for (const userId of userIds) {
-      this._completeDialog(userId);
-    }
+    await Promise.allSettled(userIds.map(userId => this._completeDialog(userId)));
     logger.info(`Flushed ${userIds.length} pending dialogs`);
   }
 

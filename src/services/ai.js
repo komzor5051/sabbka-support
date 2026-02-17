@@ -134,6 +134,7 @@ ${casesText}
 async function transcribeVoice(audioBuffer) {
   const base64 = audioBuffer.toString('base64');
 
+  // Gemini via OpenRouter accepts inline_data format for audio
   return chatCompletion(
     config.openrouter.models.gemini,
     [{
@@ -141,8 +142,10 @@ async function transcribeVoice(audioBuffer) {
       content: [
         { type: 'text', text: 'Транскрибируй это голосовое сообщение. Верни только текст, без пояснений.' },
         {
-          type: 'input_audio',
-          input_audio: { data: base64, format: 'ogg' },
+          type: 'image_url',
+          image_url: {
+            url: `data:audio/ogg;base64,${base64}`,
+          },
         },
       ],
     }],

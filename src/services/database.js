@@ -104,10 +104,17 @@ async function markAsSynced(ids) {
 }
 
 async function getCategories() {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('kb_categories')
     .select('name, description')
     .order('name');
+
+  if (error) {
+    logger.error('Failed to fetch categories', { error: error.message });
+  }
+  if (!data || data.length === 0) {
+    logger.warn('kb_categories table is empty — all dialogs will be categorized as "прочее"');
+  }
 
   return data || [];
 }
@@ -158,10 +165,10 @@ async function getAllRecords(filterCategory = null) {
 
 async function updateRecord(id, { category, summaryProblem, summarySolution, embedding }) {
   const update = {};
-  if (category) update.category = category;
-  if (summaryProblem) update.summary_problem = summaryProblem;
-  if (summarySolution) update.summary_solution = summarySolution;
-  if (embedding) update.embedding = embedding;
+  if (category !== undefined && category !== null) update.category = category;
+  if (summaryProblem !== undefined && summaryProblem !== null) update.summary_problem = summaryProblem;
+  if (summarySolution !== undefined && summarySolution !== null) update.summary_solution = summarySolution;
+  if (embedding !== undefined && embedding !== null) update.embedding = embedding;
 
   const { error } = await supabase
     .from('support_kb')

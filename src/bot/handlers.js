@@ -1,16 +1,8 @@
-const config = require('../config');
 const logger = require('../utils/logger');
 const ai = require('../services/ai');
 const db = require('../services/database');
 const { formatSearchResults } = require('../utils/formatters');
-
-function authMiddleware(ctx, next) {
-  const userId = ctx.from?.id;
-  if (!config.allowedUserIds.includes(userId)) {
-    return ctx.reply('⛔ Доступ запрещён.');
-  }
-  return next();
-}
+const { authMiddleware } = require('./auth');
 
 async function handleTextQuery(ctx) {
   const query = ctx.message.text;
@@ -81,13 +73,12 @@ async function handleForward(ctx) {
 }
 
 function setupHandlers(bot) {
-  bot.use(authMiddleware);
-
-  bot.on('voice', handleVoice);
-  bot.on('audio', handleVoice);
+  // Auth on each handler individually — NOT bot.use() which would block business_messages
+  bot.on('voice', authMiddleware, handleVoice);
+  bot.on('audio', authMiddleware, handleVoice);
 
   // Forwarded messages
-  bot.on('message', (ctx, next) => {
+  bot.on('message', authMiddleware, (ctx, next) => {
     if (ctx.message.forward_origin || ctx.message.forward_from || ctx.message.forward_date) {
       return handleForward(ctx);
     }
@@ -95,7 +86,7 @@ function setupHandlers(bot) {
   });
 
   // Text messages (non-command)
-  bot.on('text', handleTextQuery);
+  bot.on('text', authMiddleware, handleTextQuery);
 
   logger.info('Private chat handlers registered');
 }
