@@ -51,7 +51,9 @@ async function main() {
   process.once('SIGTERM', () => shutdown('SIGTERM'));
 
   // 6. Launch bot (polling mode)
-  await bot.launch();
+  // bot.launch() hangs in Telegraf 4.16 — use deleteWebhook + startPolling
+  await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+  bot.startPolling();
   logger.info('Bot is running! Polling for updates...');
   logger.info(`Allowed users: ${config.allowedUserIds.join(', ') || 'NONE (set ALLOWED_USER_IDS!)'}`);
   logger.info(`Pending dialogs in buffer: ${dialogTracker.pendingCount}`);
