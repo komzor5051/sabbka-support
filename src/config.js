@@ -8,7 +8,7 @@ module.exports = {
     apiKey: process.env.OPENROUTER_API_KEY,
     baseUrl: 'https://openrouter.ai/api/v1',
     models: {
-      gemini: 'google/gemini-2.5-flash-lite-preview',
+      gemini: 'google/gemini-2.5-flash-lite',
       embedding: 'openai/text-embedding-3-small',
     },
   },
