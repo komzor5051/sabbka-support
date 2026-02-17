@@ -19,6 +19,7 @@ function setupCommands(bot, { syncSheets }) {
       '/export [N] — выгрузить CSV\n' +
       '/sync_now — синхр. с Google Sheets\n' +
       '/add_category [имя] [описание]\n' +
+      '/skip — пропустить сохранение, новый вопрос\n' +
       '/change [правило] — изменить категоризацию\n' +
       '/recalculate [категория] — пересчитать'
     );
