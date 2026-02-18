@@ -4,7 +4,7 @@ const ai = require('../services/ai');
 const { formatStats, formatModels } = require('../utils/formatters');
 const { authMiddleware } = require('./auth');
 
-function setupCommands(bot, { syncSheets }) {
+function setupCommands(bot) {
   // /start — no auth (public info)
   bot.command('start', (ctx) => {
     ctx.reply(
@@ -17,7 +17,6 @@ function setupCommands(bot, { syncSheets }) {
       '/stats — статистика базы\n' +
       '/models — список моделей Сабка\n' +
       '/export [N] — выгрузить CSV\n' +
-      '/sync_now — синхр. с Google Sheets\n' +
       '/add_category [имя] [описание]\n' +
       '/skip — пропустить сохранение, новый вопрос\n' +
       '/change [правило] — изменить категоризацию\n' +
@@ -68,17 +67,6 @@ function setupCommands(bot, { syncSheets }) {
     } catch (err) {
       logger.error('/export failed', { error: err.message });
       await ctx.reply('❌ Ошибка экспорта.');
-    }
-  });
-
-  bot.command('sync_now', authMiddleware, async (ctx) => {
-    try {
-      await ctx.reply('🔄 Запускаю синхронизацию с Google Sheets...');
-      const count = await syncSheets();
-      await ctx.reply(`✅ Синхронизировано записей: ${count}`);
-    } catch (err) {
-      logger.error('/sync_now failed', { error: err.message });
-      await ctx.reply('❌ Ошибка синхронизации.');
     }
   });
 
@@ -137,9 +125,7 @@ function setupCommands(bot, { syncSheets }) {
             analysis.category = 'прочее';
           }
 
-          const embedding = await ai.generateEmbedding(
-            `${analysis.summary_problem} ${analysis.summary_solution}`
-          );
+          const embedding = await ai.generateEmbedding(record.full_dialog);
 
           await db.updateRecord(record.id, {
             category: analysis.category,
@@ -188,9 +174,7 @@ function setupCommands(bot, { syncSheets }) {
             analysis.category = 'прочее';
           }
 
-          const embedding = await ai.generateEmbedding(
-            `${analysis.summary_problem} ${analysis.summary_solution}`
-          );
+          const embedding = await ai.generateEmbedding(record.full_dialog);
 
           await db.updateRecord(record.id, {
             category: analysis.category,

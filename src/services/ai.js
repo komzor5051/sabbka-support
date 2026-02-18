@@ -42,7 +42,16 @@ async function chatCompletion(model, messages, { temperature = 0.3, maxTokens = 
   return data.choices[0].message.content;
 }
 
+// ~7000 tokens ≈ 14000 chars for Russian (2 chars/token average for Cyrillic)
+const EMBEDDING_MAX_CHARS = 14000;
+
+function truncateForEmbedding(text) {
+  if (text.length <= EMBEDDING_MAX_CHARS) return text;
+  return text.substring(0, EMBEDDING_MAX_CHARS);
+}
+
 async function generateEmbedding(text) {
+  const truncated = truncateForEmbedding(text);
   const res = await fetch(`${OPENROUTER_BASE}/embeddings`, {
     method: 'POST',
     headers: {
@@ -51,7 +60,7 @@ async function generateEmbedding(text) {
     },
     body: JSON.stringify({
       model: config.openrouter.models.embedding,
-      input: text,
+      input: truncated,
     }),
   });
 
@@ -73,10 +82,14 @@ async function analyzeDialog(fullDialog, categories, rules) {
 
   const prompt = `Проанализируй диалог из службы поддержки. Верни JSON (без markdown):
 {
-  "summary_problem": "краткая суть проблемы (1-2 предложения)",
-  "summary_solution": "как решили / что посоветовали (1-2 предложения)",
+  "summary_problem": "подробное описание проблемы пользователя со всеми деталями, контекстом и шагами воспроизведения (5-15 предложений)",
+  "summary_solution": "подробное описание решения, что именно посоветовали, какие шаги предложили, чем закончился диалог (5-15 предложений)",
   "category": "одна из категорий ниже"
 }
+
+ВАЖНО: summary_problem и summary_solution должны быть МАКСИМАЛЬНО подробными и конкретными.
+Включай все детали из диалога: конкретные ошибки, названия моделей, действия пользователя, точные формулировки решения.
+НЕ обобщай, НЕ абстрагируй — сохраняй конкретику.
 
 Доступные категории:
 ${categoryList}
@@ -90,7 +103,7 @@ ${fullDialog}`;
   const result = await chatCompletion(
     config.openrouter.models.gemini,
     [{ role: 'user', content: prompt }],
-    { temperature: 0.1, maxTokens: 512 }
+    { temperature: 0.1, maxTokens: 2048 }
   );
 
   try {
@@ -111,7 +124,7 @@ async function generateAnswer(query, similarCases, { temperature = 0.4 } = {}) {
   }
 
   const casesText = similarCases.map((c, i) =>
-    `Кейс ${i + 1} (совпадение ${Math.round(c.similarity * 100)}%):\nПроблема: ${c.summary_problem}\nРешение: ${c.summary_solution}\nДиалог: ${c.full_dialog?.substring(0, 500)}`
+    `Кейс ${i + 1} (совпадение ${Math.round(c.similarity * 100)}%):\nПроблема: ${c.summary_problem}\nРешение: ${c.summary_solution}\nДиалог: ${c.full_dialog?.substring(0, 2000)}`
   ).join('\n\n');
 
   const prompt = `Ты — помощник оператора поддержки сервиса "Сабка" (sabka.pro — мультичат с AI моделями).

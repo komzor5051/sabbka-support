@@ -1,5 +1,4 @@
 const { Telegraf } = require('telegraf');
-const cron = require('node-cron');
 
 const config = require('./config');
 const logger = require('./utils/logger');
@@ -7,7 +6,6 @@ const DialogTracker = require('./services/dialog-tracker');
 const { processCompletedDialog, setupBusinessHandlers } = require('./bot/business');
 const { setupHandlers } = require('./bot/handlers');
 const { setupCommands } = require('./bot/commands');
-const { syncToSheets } = require('./services/sheets');
 
 async function main() {
   logger.info('Starting Sabka Support KB Bot...');
@@ -24,22 +22,11 @@ async function main() {
   // Business messages first (they come via business_message update type)
   setupBusinessHandlers(bot, dialogTracker);
   // Commands before generic text handler
-  setupCommands(bot, { syncSheets: syncToSheets });
+  setupCommands(bot);
   // Generic handlers last (text, voice, forward)
   setupHandlers(bot);
 
-  // 4. Schedule Google Sheets sync every 30 min
-  cron.schedule(`*/${config.sheetsSyncIntervalMin} * * * *`, async () => {
-    logger.info('Cron: starting Sheets sync...');
-    try {
-      const count = await syncToSheets();
-      logger.info('Cron: Sheets sync complete', { count });
-    } catch (err) {
-      logger.error('Cron: Sheets sync failed', { error: err.message });
-    }
-  });
-
-  // 5. Graceful shutdown — flush pending dialogs
+  // 4. Graceful shutdown — flush pending dialogs
   const shutdown = async (signal) => {
     logger.info(`Received ${signal}, shutting down...`);
     await dialogTracker.flushAll();
@@ -50,7 +37,7 @@ async function main() {
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
 
-  // 6. Launch bot (polling mode)
+  // 5. Launch bot (polling mode)
   // bot.launch() hangs in Telegraf 4.16 — use deleteWebhook + startPolling
   await bot.telegram.deleteWebhook({ drop_pending_updates: true });
   bot.startPolling();

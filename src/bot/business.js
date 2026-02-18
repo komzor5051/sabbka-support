@@ -20,8 +20,8 @@ async function processCompletedDialog({ userId, firstMessageId, fullDialog, mess
       analysis.category = 'прочее';
     }
 
-    const embeddingText = `${analysis.summary_problem} ${analysis.summary_solution}`;
-    const embedding = await ai.generateEmbedding(embeddingText);
+    // Embed full dialog for maximum semantic coverage (~7000 tokens)
+    const embedding = await ai.generateEmbedding(fullDialog);
 
     await db.insertDialog({
       telegramMessageId: firstMessageId,
