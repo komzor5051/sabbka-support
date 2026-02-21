@@ -1,3 +1,10 @@
+const TG_MAX_LENGTH = 4096;
+
+function truncate(str, max) {
+  if (!str || str.length <= max) return str || 'N/A';
+  return str.substring(0, max - 1) + '…';
+}
+
 /**
  * Format search results for Telegram message
  */
@@ -14,14 +21,19 @@ function formatSearchResults(results, generatedAnswer) {
   results.forEach((r, i) => {
     const pct = Math.round(r.similarity * 100);
     text += `${i + 1}. [${pct}% совпадение]\n`;
-    text += `   Проблема: ${r.summary_problem || 'N/A'}\n`;
-    text += `   Решение: ${r.summary_solution || 'N/A'}\n`;
+    text += `   Проблема: ${truncate(r.summary_problem, 300)}\n`;
+    text += `   Решение: ${truncate(r.summary_solution, 300)}\n`;
     text += `   Категория: ${r.category}\n\n`;
   });
 
   if (generatedAnswer) {
     text += `💡 Рекомендуемый ответ (уверенность: ${confidence}):\n`;
     text += `"${generatedAnswer}"`;
+  }
+
+  // Safety net: Telegram rejects messages over 4096 chars
+  if (text.length > TG_MAX_LENGTH) {
+    text = text.substring(0, TG_MAX_LENGTH - 1) + '…';
   }
 
   return text;
