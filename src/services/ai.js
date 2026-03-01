@@ -171,4 +171,5 @@ module.exports = {
   generateEmbedding,
   generateAnswer,
   transcribeVoice,
+  chatCompletion,
 };
