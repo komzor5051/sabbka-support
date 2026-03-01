@@ -52,7 +52,7 @@ async function notifyAdmins(bot, userId, userText) {
   const alert =
     `⚠️ Эскалация!\n\n` +
     `Пользователь ID: ${userId}\n` +
-    `Сообщение: "${userText}"`;
+    `Сообщение: "${userText.length > 500 ? userText.substring(0, 500) + '…' : userText}"`;
 
   for (const adminId of config.allowedUserIds) {
     try {
@@ -104,8 +104,11 @@ async function handle(ctx, msg, bot) {
       await notifyAdmins(bot, userId, userText);
     }
 
-    // 7. Reply to user
-    await ctx.reply(cleanResponse);
+    // 7. Reply to user via business connection (required for Business API)
+    const businessConnectionId = ctx.update?.business_message?.business_connection_id;
+    await ctx.telegram.sendMessage(msg.chat.id, cleanResponse, {
+      ...(businessConnectionId && { business_connection_id: businessConnectionId }),
+    });
 
     // 8. Persist both turns to history
     await chatHistory.saveMessage(userId, 'user', userText);

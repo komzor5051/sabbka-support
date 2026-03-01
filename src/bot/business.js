@@ -2,6 +2,7 @@ const logger = require('../utils/logger');
 const config = require('../config');
 const db = require('../services/database');
 const ai = require('../services/ai');
+const supportChat = require('../services/support-chat');
 
 async function processCompletedDialog({ userId, firstMessageId, fullDialog, messageCount }) {
   try {
@@ -66,6 +67,13 @@ function setupBusinessHandlers(bot, dialogTracker) {
       messageId: msg.message_id,
       date: new Date(msg.date * 1000),
     });
+
+    // New: AI auto-response for USER messages only
+    if (!isSupport) {
+      supportChat.handle(ctx, msg, bot).catch((err) => {
+        logger.error('support-chat handler threw', { error: err.message });
+      });
+    }
   });
 
   logger.info('Business message handlers registered');
