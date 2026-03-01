@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 module.exports = {
@@ -34,4 +36,19 @@ module.exports = {
     { name: 'описание_моделей', description: 'Вопросы про модели и их функции' },
     { name: 'прочее', description: 'Всё остальное' },
   ],
+  supportChat: {
+    systemPromptPath: path.resolve(__dirname, '../docs/system-prompt.md'),
+    knowledgeBasePath: path.resolve(__dirname, '../docs/knowledge-base.md'),
+    historyLimit: 10,
+    onlineKeywords: [
+      'не работает', 'ошибка', 'error', 'баг', 'обновление',
+      'новая версия', 'вышло', 'упало', 'не отвечает', 'недоступно',
+    ],
+    get systemPrompt() {
+      return fs.readFileSync(this.systemPromptPath, 'utf-8');
+    },
+    get knowledgeBase() {
+      return fs.readFileSync(this.knowledgeBasePath, 'utf-8');
+    },
+  },
 };
