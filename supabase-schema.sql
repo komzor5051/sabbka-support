@@ -77,3 +77,14 @@ $$;
 
 -- HNSW index for vector search (works without training data, good for <1000 rows)
 CREATE INDEX ON support_kb USING hnsw (embedding vector_cosine_ops);
+
+-- AI Support Chat history
+CREATE TABLE chat_history (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX ON chat_history (user_id, created_at);
