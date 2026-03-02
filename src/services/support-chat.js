@@ -75,12 +75,17 @@ async function handle(ctx, msg, bot) {
   const userId = msg.chat.id; // Use chat.id as conversation key (same as dialog-tracker)
   const userText = msg.text;
 
+  logger.info('support-chat: START', { userId, textLen: userText.length });
+
   try {
     // 1. Fetch conversation history
+    logger.info('support-chat: step 1 — getHistory', { userId });
     const history = await chatHistory.getHistory(userId, config.supportChat.historyLimit);
+    logger.info('support-chat: step 1 OK', { userId, historyLen: history.length });
 
     // 2. Build messages array
     const messages = buildMessages(userText, history);
+    logger.info('support-chat: step 2 — messages built', { userId, msgCount: messages.length });
 
     // 3. Select model — add :online for diagnostic queries
     const model = needsOnline(userText)
@@ -92,7 +97,9 @@ async function handle(ctx, msg, bot) {
     }
 
     // 4. Call OpenRouter
+    logger.info('support-chat: step 4 — calling AI', { userId, model });
     const response = await ai.chatCompletion(model, messages, { temperature: 0.4, maxTokens: 512 });
+    logger.info('support-chat: step 4 OK', { userId, responseLen: response.length });
 
     // 5. Detect and strip [ESCALATE] tag
     const hasEscalate = response.includes(ESCALATE_TAG);
@@ -105,6 +112,7 @@ async function handle(ctx, msg, bot) {
     }
 
     // 7. Reply to user via business connection (required for Business API)
+    logger.info('support-chat: step 7 — sending reply', { userId });
     const businessConnectionId = ctx.update?.business_message?.business_connection_id;
     await ctx.telegram.sendMessage(msg.chat.id, cleanResponse, {
       ...(businessConnectionId && { business_connection_id: businessConnectionId }),
@@ -117,7 +125,7 @@ async function handle(ctx, msg, bot) {
     logger.info('support-chat: replied', { userId, escalated: hasEscalate });
   } catch (err) {
     // Silent fail — human operator can still reply via @sabka_help manually
-    logger.error('support-chat: handle failed', { userId, error: err.message });
+    logger.error('support-chat: handle failed', { userId, error: err.message, stack: err.stack });
   }
 }
 
