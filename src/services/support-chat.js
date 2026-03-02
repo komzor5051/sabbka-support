@@ -5,6 +5,23 @@ const chatHistory = require('./chat-history');
 
 const ESCALATE_TAG = '[ESCALATE]';
 
+// Fallback: if user explicitly asks for a human, escalate even if model forgot the tag
+const USER_ESCALATION_PHRASES = [
+  'позови человека', 'позовите человека',
+  'хочу человека', 'хочу оператора', 'хочу менеджера',
+  'живой человек', 'живого человека', 'живой оператор',
+  'соедините с человеком', 'соедини с человеком',
+  'переведите на человека', 'переведи на человека',
+  'поговорить с человеком', 'связаться с человеком',
+  'нужен человек', 'нужен оператор',
+  'дайте человека', 'дай человека',
+];
+
+function userAskedForHuman(text) {
+  const lower = text.toLowerCase();
+  return USER_ESCALATION_PHRASES.some(phrase => lower.includes(phrase));
+}
+
 /**
  * Determine if message warrants Exa web search (:online suffix).
  * Adds $0.02 per request — only for diagnostic/technical queries.
@@ -107,13 +124,16 @@ async function handle(ctx, msg, bot) {
     const response = await ai.chatCompletion(model, messages, { temperature: 0.4, maxTokens: 512 });
     logger.info('support-chat: step 4 OK', { userId, responseLen: response.length });
 
-    // 5. Detect and strip [ESCALATE] tag
-    const hasEscalate = response.includes(ESCALATE_TAG);
+    // 5. Detect escalation: model tag OR user explicitly asked for human
+    const hasModelTag = response.includes(ESCALATE_TAG);
+    const hasUserRequest = userAskedForHuman(userText);
+    const shouldEscalate = hasModelTag || hasUserRequest;
     const cleanResponse = response.replaceAll(ESCALATE_TAG, '').trim();
 
     // 6. Notify admins if escalated
-    if (hasEscalate) {
-      logger.info('support-chat: escalating', { userId });
+    if (shouldEscalate) {
+      const reason = hasModelTag ? 'model_tag' : 'user_request';
+      logger.info('support-chat: escalating', { userId, reason });
       const username = msg.from?.username || msg.chat?.username;
       await notifyAdmins(bot, userId, username, userText);
     }
@@ -129,7 +149,7 @@ async function handle(ctx, msg, bot) {
     await chatHistory.saveMessage(userId, 'user', userText);
     await chatHistory.saveMessage(userId, 'assistant', cleanResponse);
 
-    logger.info('support-chat: replied', { userId, escalated: hasEscalate });
+    logger.info('support-chat: replied', { userId, escalated: shouldEscalate });
   } catch (err) {
     // Silent fail — human operator can still reply via @sabka_help manually
     logger.error('support-chat: handle failed', { userId, error: err.message, stack: err.stack });
