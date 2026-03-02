@@ -48,11 +48,17 @@ function buildMessages(userText, history) {
  * Notify all admins about an escalated conversation.
  * Errors here are non-fatal — user still gets a reply.
  */
-async function notifyAdmins(bot, userId, userText) {
+async function notifyAdmins(bot, userId, username, userText) {
+  const userLabel = username ? `@${username}` : `ID ${userId}`;
+  const truncatedText = userText.length > 500 ? userText.substring(0, 500) + '…' : userText;
+  const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+
   const alert =
-    `⚠️ Эскалация!\n\n` +
-    `Пользователь ID: ${userId}\n` +
-    `Сообщение: "${userText.length > 500 ? userText.substring(0, 500) + '…' : userText}"`;
+    `🆘 Бот не смог ответить\n\n` +
+    `От пользователя: ${userLabel}\n` +
+    `Вопрос: ${truncatedText}\n` +
+    `Время: ${timestamp}\n\n` +
+    `Требуется ответ команды.`;
 
   for (const adminId of config.allowedUserIds) {
     try {
@@ -108,7 +114,8 @@ async function handle(ctx, msg, bot) {
     // 6. Notify admins if escalated
     if (hasEscalate) {
       logger.info('support-chat: escalating', { userId });
-      await notifyAdmins(bot, userId, userText);
+      const username = msg.from?.username || msg.chat?.username;
+      await notifyAdmins(bot, userId, username, userText);
     }
 
     // 7. Reply to user via business connection (required for Business API)
