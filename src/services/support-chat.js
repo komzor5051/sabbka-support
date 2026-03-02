@@ -60,7 +60,7 @@ async function notifyAdmins(bot, userId, username, userText) {
     `Время: ${timestamp}\n\n` +
     `Требуется ответ команды.`;
 
-  for (const adminId of config.allowedUserIds) {
+  for (const adminId of config.escalationUserIds) {
     try {
       await bot.telegram.sendMessage(adminId, alert);
     } catch (err) {

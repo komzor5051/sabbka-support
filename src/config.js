@@ -26,6 +26,10 @@ module.exports = {
     .split(',')
     .map(id => parseInt(id.trim(), 10))
     .filter(Boolean),
+  escalationUserIds: (process.env.ESCALATION_USER_IDS || '8572634797')
+    .split(',')
+    .map(id => parseInt(id.trim(), 10))
+    .filter(Boolean),
   dialogTimeoutMs: 5 * 60 * 1000, // 5 minutes
   sheetsSyncIntervalMin: 30,
   defaultCategories: [
