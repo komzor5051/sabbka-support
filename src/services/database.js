@@ -28,11 +28,12 @@ async function insertDialog({ telegramMessageId, telegramUserId, category, fullD
   return data;
 }
 
-async function searchSimilar(queryEmbedding, matchCount = 3, filterCategory = null) {
+async function searchSimilar(queryEmbedding, matchCount = 5, filterCategory = null, threshold = 0.7) {
   const { data, error } = await supabase.rpc('search_kb', {
     query_embedding: queryEmbedding,
     match_count: matchCount,
     filter_category: filterCategory,
+    similarity_threshold: threshold,
   });
 
   if (error) {
@@ -178,6 +179,21 @@ async function updateRecord(id, { category, summaryProblem, summarySolution, emb
   if (error) throw error;
 }
 
+async function getChatHistory() {
+  const { data, error } = await supabase
+    .from('chat_history')
+    .select('user_id, role, content, created_at')
+    .order('user_id')
+    .order('created_at');
+
+  if (error) {
+    logger.error('Failed to get chat_history', { error: error.message });
+    return [];
+  }
+
+  return data || [];
+}
+
 async function exportRecords(limit = 50) {
   const { data } = await supabase
     .from('support_kb')
@@ -201,4 +217,5 @@ module.exports = {
   getAllRecords,
   updateRecord,
   exportRecords,
+  getChatHistory,
 };

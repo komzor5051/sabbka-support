@@ -124,7 +124,7 @@ async function generateAnswer(query, similarCases, { temperature = 0.4 } = {}) {
   }
 
   const casesText = similarCases.map((c, i) =>
-    `Кейс ${i + 1} (совпадение ${Math.round(c.similarity * 100)}%):\nПроблема: ${c.summary_problem}\nРешение: ${c.summary_solution}\nДиалог: ${c.full_dialog?.substring(0, 2000)}`
+    `Кейс ${i + 1} (совпадение ${Math.round(c.similarity * 100)}%):\nПроблема: ${c.summary_problem}\nРешение: ${c.summary_solution}\nДиалог: ${c.full_dialog?.substring(0, 3000)}`
   ).join('\n\n');
 
   const prompt = `Ты — помощник оператора поддержки сервиса "Сабка" (sabka.pro — мультичат с AI моделями).

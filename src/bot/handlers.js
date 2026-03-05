@@ -1,9 +1,11 @@
 const { Markup } = require('telegraf');
 const logger = require('../utils/logger');
+const config = require('../config');
 const ai = require('../services/ai');
 const db = require('../services/database');
 const { formatSearchResults } = require('../utils/formatters');
 const { authMiddleware } = require('./auth');
+const escalationStore = require('../services/escalation-store');
 
 // Pending context: stores query, generated answer, and mode
 // mode: 'buttons' — waiting for inline button click
@@ -99,7 +101,7 @@ async function handleTextQuery(ctx) {
 
   try {
     const queryEmbedding = await ai.generateEmbedding(query);
-    const results = await db.searchSimilar(queryEmbedding, 3);
+    const results = await db.searchSimilar(queryEmbedding, 5);
     const answer = await ai.generateAnswer(query, results);
     const text = formatSearchResults(results, answer);
 
@@ -137,7 +139,7 @@ async function handleVoice(ctx) {
     await ctx.reply(`📝 Распознано: "${transcription}"\n\n🔍 Ищу в базе...`);
 
     const queryEmbedding = await ai.generateEmbedding(transcription);
-    const results = await db.searchSimilar(queryEmbedding, 3);
+    const results = await db.searchSimilar(queryEmbedding, 5);
     const answer = await ai.generateAnswer(transcription, results);
     const text = formatSearchResults(results, answer);
 
@@ -169,7 +171,7 @@ async function handleForward(ctx) {
 
   try {
     const queryEmbedding = await ai.generateEmbedding(text);
-    const results = await db.searchSimilar(queryEmbedding, 3);
+    const results = await db.searchSimilar(queryEmbedding, 5);
     const answer = await ai.generateAnswer(text, results);
     const response = formatSearchResults(results, answer);
 
@@ -189,6 +191,42 @@ async function handleForward(ctx) {
 }
 
 function setupHandlers(bot) {
+  // Operator reply forwarding — BEFORE auth-protected handlers
+  // When an admin replies to an escalation notification, forward their text to the user
+  bot.on('text', (ctx, next) => {
+    const senderId = ctx.from?.id;
+    const replyTo = ctx.message?.reply_to_message;
+
+    // Only process if: sender is an escalation admin AND they're replying to a message
+    if (!replyTo || !config.escalationUserIds.includes(senderId)) {
+      return next();
+    }
+
+    const escalation = escalationStore.getEscalation(replyTo.message_id);
+    if (!escalation) {
+      return next(); // Not a reply to an escalation notification
+    }
+
+    const userChatId = escalation.userChatId;
+    const bcId = escalationStore.getBusinessConnectionId();
+    const replyText = ctx.message.text;
+
+    if (!bcId) {
+      logger.error('escalation-reply: no businessConnectionId captured yet');
+      return ctx.reply('Ошибка: business_connection_id ещё не получен. Подождите пока придёт хотя бы одно сообщение от пользователя.');
+    }
+
+    ctx.telegram.sendMessage(userChatId, replyText, { business_connection_id: bcId })
+      .then(() => {
+        ctx.reply('Ответ доставлен');
+        logger.info('escalation-reply: forwarded to user', { userChatId, adminId: senderId });
+      })
+      .catch((err) => {
+        ctx.reply('Ошибка доставки: ' + err.message);
+        logger.error('escalation-reply: failed', { userChatId, error: err.message });
+      });
+  });
+
   // /skip — clear pending context, next message is a new query
   bot.command('skip', authMiddleware, (ctx) => {
     pendingContext.delete(ctx.from.id);

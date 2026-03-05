@@ -3,6 +3,7 @@ const config = require('../config');
 const db = require('../services/database');
 const ai = require('../services/ai');
 const supportChat = require('../services/support-chat');
+const escalationStore = require('../services/escalation-store');
 
 async function processCompletedDialog({ userId, firstMessageId, fullDialog, messageCount }) {
   try {
@@ -51,6 +52,12 @@ function setupBusinessHandlers(bot, dialogTracker) {
   bot.on('business_message', (ctx) => {
     const msg = ctx.businessMessage || ctx.update.business_message;
     if (!msg || !msg.text) return;
+
+    // Capture business_connection_id for operator reply forwarding
+    const bcId = msg.business_connection_id || ctx.update?.business_message?.business_connection_id;
+    if (bcId) {
+      escalationStore.setBusinessConnectionId(bcId);
+    }
 
     const chatUserId = msg.from.id;
 

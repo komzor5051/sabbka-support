@@ -45,8 +45,9 @@ INSERT INTO kb_categories (name, description) VALUES
 -- Vector similarity search function
 CREATE OR REPLACE FUNCTION search_kb(
   query_embedding VECTOR(1536),
-  match_count INT DEFAULT 3,
-  filter_category TEXT DEFAULT NULL
+  match_count INT DEFAULT 5,
+  filter_category TEXT DEFAULT NULL,
+  similarity_threshold FLOAT DEFAULT 0.7
 )
 RETURNS TABLE (
   id UUID,
@@ -56,23 +57,15 @@ RETURNS TABLE (
   summary_solution TEXT,
   similarity FLOAT
 )
-LANGUAGE plpgsql
-AS $$
-BEGIN
-  RETURN QUERY
-  SELECT
-    s.id,
-    s.category,
-    s.full_dialog,
-    s.summary_problem,
-    s.summary_solution,
-    1 - (s.embedding <=> query_embedding) AS similarity
-  FROM support_kb s
-  WHERE s.embedding IS NOT NULL
-    AND (filter_category IS NULL OR s.category = filter_category)
-  ORDER BY s.embedding <=> query_embedding
+LANGUAGE SQL AS $$
+  SELECT id, category, full_dialog, summary_problem, summary_solution,
+         1 - (embedding <=> query_embedding) AS similarity
+  FROM support_kb
+  WHERE embedding IS NOT NULL
+    AND (filter_category IS NULL OR category = filter_category)
+    AND (1 - (embedding <=> query_embedding)) >= similarity_threshold
+  ORDER BY embedding <=> query_embedding
   LIMIT match_count;
-END;
 $$;
 
 -- HNSW index for vector search (works without training data, good for <1000 rows)

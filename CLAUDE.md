@@ -41,10 +41,12 @@ GOOGLE_SHEET_ID
 ALLOWED_USER_IDS            (comma-separated Telegram user IDs)
 ```
 
-## Key Decisions
-- Polling (not webhook) — simpler for Railway
-- In-memory dialog tracker with 5-min timeout — flushes on shutdown
-- HNSW index (not IVFFlat) — works without training data
-- Single OpenRouter key for Gemini + OpenAI embeddings
-- Dynamic categories via kb_categories table
-- Categorization rules via kb_rules table (/change command)
+## Critical Gotchas
+
+- **`bot.launch()` hangs in Telegraf 4.16** — use `deleteWebhook + startPolling` (index.js:42-43)
+- **Handler registration order matters** — `setupBusinessHandlers` → `setupCommands` → `setupHandlers`
+- **`allowedUserIds` has dual purpose** — auth whitelist AND dialog role tagging (SUPPORT vs USER label)
+- **Auth must NOT be `bot.use()`** — applied per-command/handler to avoid blocking business_message updates
+- **`GOOGLE_SHEETS_CREDENTIALS`** — base64-encoded service account JSON
+- **`/change` and `/recalculate`** — re-run AI on ALL records sequentially; expensive on large KB
+- **HNSW index** (design doc mentions IVFFlat — outdated; actual schema uses HNSW)

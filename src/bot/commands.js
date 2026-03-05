@@ -20,7 +20,8 @@ function setupCommands(bot) {
       '/add_category [имя] [описание]\n' +
       '/skip — пропустить сохранение, новый вопрос\n' +
       '/change [правило] — изменить категоризацию\n' +
-      '/recalculate [категория] — пересчитать'
+      '/recalculate [категория] — пересчитать\n' +
+      '/rebuild_kb — пересобрать KB из chat_history + переклассифицировать все записи'
     );
   });
 
@@ -196,6 +197,117 @@ function setupCommands(bot) {
     } catch (err) {
       logger.error('/recalculate failed', { error: err.message });
       await ctx.reply('❌ Ошибка при пересчете.');
+    }
+  });
+
+  bot.command('rebuild_kb', authMiddleware, async (ctx) => {
+    await ctx.reply('🔨 Запускаю пересборку KB...\nШаг A: импорт из chat_history');
+
+    try {
+      const categories = await db.getCategories();
+      const rules = await db.getRules();
+      const validCats = categories.map(c => c.name);
+
+      // === STEP A: import sessions from chat_history ===
+      const rows = await db.getChatHistory();
+
+      // Group rows by user_id
+      const byUser = {};
+      for (const row of rows) {
+        if (!byUser[row.user_id]) byUser[row.user_id] = [];
+        byUser[row.user_id].push(row);
+      }
+
+      // Split each user's messages into sessions (gap > 4h = new session)
+      const SESSION_GAP_MS = 4 * 60 * 60 * 1000;
+      const sessions = [];
+      for (const messages of Object.values(byUser)) {
+        let session = [messages[0]];
+        for (let i = 1; i < messages.length; i++) {
+          const gap = new Date(messages[i].created_at) - new Date(messages[i - 1].created_at);
+          if (gap > SESSION_GAP_MS) {
+            sessions.push(session);
+            session = [];
+          }
+          session.push(messages[i]);
+        }
+        if (session.length > 0) sessions.push(session);
+      }
+
+      // Filter sessions with at least 1 user + 1 assistant message
+      const validSessions = sessions.filter(s =>
+        s.some(m => m.role === 'user') && s.some(m => m.role === 'assistant')
+      );
+
+      let added = 0;
+      for (let i = 0; i < validSessions.length; i++) {
+        const session = validSessions[i];
+        const dialogText = session
+          .map(m => `${m.role === 'user' ? '[USER]' : '[БОТА]'}: ${m.content}`)
+          .join('\n');
+
+        try {
+          const analysis = await ai.analyzeDialog(dialogText, categories, rules);
+          if (!validCats.includes(analysis.category)) analysis.category = 'прочее';
+
+          const embeddingText = `${analysis.summary_problem} ${analysis.summary_solution}`;
+          const embedding = await ai.generateEmbedding(embeddingText);
+
+          await db.insertDialog({
+            telegramMessageId: null,
+            telegramUserId: session[0].user_id,
+            category: analysis.category,
+            fullDialog: dialogText,
+            summaryProblem: analysis.summary_problem,
+            summarySolution: analysis.summary_solution,
+            embedding,
+          });
+
+          added++;
+          if (added % 5 === 0) {
+            await ctx.reply(`Шаг A: обработано ${added}/${validSessions.length} сессий`);
+          }
+        } catch (err) {
+          logger.error('rebuild_kb: failed to process session', { i, error: err.message });
+        }
+      }
+
+      await ctx.reply(`Шаг A завершён: добавлено ${added} из ${validSessions.length} сессий\n\nШаг B: переклассификация существующих записей...`);
+
+      // === STEP B: reclassify existing support_kb records ===
+      const existing = await db.getAllRecords();
+      let reclassified = 0;
+
+      for (const record of existing) {
+        try {
+          const analysis = await ai.analyzeDialog(record.full_dialog, categories, rules);
+          if (!validCats.includes(analysis.category)) analysis.category = 'прочее';
+
+          const embeddingText = `${analysis.summary_problem} ${analysis.summary_solution}`;
+          const embedding = await ai.generateEmbedding(embeddingText);
+
+          await db.updateRecord(record.id, {
+            category: analysis.category,
+            summaryProblem: analysis.summary_problem,
+            summarySolution: analysis.summary_solution,
+            embedding,
+          });
+
+          reclassified++;
+          if (reclassified % 10 === 0) {
+            await ctx.reply(`Шаг B: переклассифицировано ${reclassified}/${existing.length}`);
+          }
+        } catch (err) {
+          logger.error('rebuild_kb: failed to reclassify record', { id: record.id, error: err.message });
+        }
+      }
+
+      await ctx.reply(
+        `✅ Готово.\nДобавлено из chat_history: ${added}\nПереклассифицировано: ${reclassified}/${existing.length}`
+      );
+    } catch (err) {
+      logger.error('/rebuild_kb failed', { error: err.message });
+      await ctx.reply('❌ Ошибка при пересборке KB: ' + err.message);
     }
   });
 

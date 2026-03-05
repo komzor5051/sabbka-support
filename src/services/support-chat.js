@@ -125,11 +125,11 @@ async function handle(ctx, msg, bot) {
     const history = await chatHistory.getHistory(userId, config.supportChat.historyLimit);
     logger.info('support-chat: step 1 OK', { userId, historyLen: history.length });
 
-    // ONE-REPLY MODE: only respond to the very first message in a new chat.
-    // Subsequent messages are silently skipped — dialog-tracker still collects
-    // everything for KB building via business.js.
-    if (history.length > 0) {
-      logger.info('support-chat: skipping (already replied once)', { userId });
+    // TWO-REPLY MODE: respond to first 2 messages, then go silent.
+    // dialog-tracker still collects everything for KB building.
+    const repliesGiven = history.filter(m => m.role === 'assistant').length;
+    if (repliesGiven >= 2) {
+      logger.info('support-chat: skipping (2 replies already given)', { userId });
       return;
     }
 
