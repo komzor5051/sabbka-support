@@ -179,10 +179,12 @@ async function updateRecord(id, { category, summaryProblem, summarySolution, emb
   if (error) throw error;
 }
 
-async function getChatHistory() {
+async function getChatHistory(days = 14) {
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const { data, error } = await supabase
     .from('chat_history')
     .select('user_id, role, content, created_at')
+    .gte('created_at', since)
     .order('user_id')
     .order('created_at');
 

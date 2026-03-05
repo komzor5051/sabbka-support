@@ -6,12 +6,12 @@ const supabase = createClient(config.supabase.url, config.supabase.serviceKey);
 
 /**
  * Retrieve last N messages for a user, oldest first.
- * Returns array of { role, content } for OpenRouter messages array.
+ * Returns array of { role, content, created_at }.
  */
 async function getHistory(userId, limit = 10) {
   const { data, error } = await supabase
     .from('chat_history')
-    .select('role, content')
+    .select('role, content, created_at')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .limit(limit);

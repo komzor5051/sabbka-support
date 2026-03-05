@@ -122,18 +122,22 @@ async function handle(ctx, msg, bot) {
   try {
     // 1. Fetch conversation history
     logger.info('support-chat: step 1 — getHistory', { userId });
-    const history = await chatHistory.getHistory(userId, config.supportChat.historyLimit);
-    logger.info('support-chat: step 1 OK', { userId, historyLen: history.length });
+    const allHistory = await chatHistory.getHistory(userId, config.supportChat.historyLimit);
+    logger.info('support-chat: step 1 OK', { userId, historyLen: allHistory.length });
 
-    // TWO-REPLY MODE: respond to first 2 messages, then go silent.
-    // dialog-tracker still collects everything for KB building.
-    const repliesGiven = history.filter(m => m.role === 'assistant').length;
+    // TWO-REPLY MODE: count only replies within current session (last 4 hours).
+    // If user comes back after 4h — treat as a new session, counter resets.
+    const SESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
+    const sessionCutoff = new Date(Date.now() - SESSION_WINDOW_MS);
+    const sessionHistory = allHistory.filter(m => new Date(m.created_at) >= sessionCutoff);
+    const repliesGiven = sessionHistory.filter(m => m.role === 'assistant').length;
     if (repliesGiven >= 2) {
-      logger.info('support-chat: skipping (2 replies already given)', { userId });
+      logger.info('support-chat: skipping (2 replies in current session)', { userId });
       return;
     }
 
-    // 2. Build messages array
+    // 2. Build messages array — strip created_at before passing to OpenRouter
+    const history = sessionHistory.map(({ role, content }) => ({ role, content }));
     const messages = buildMessages(userText, history);
     logger.info('support-chat: step 2 — messages built', { userId, msgCount: messages.length });
 
