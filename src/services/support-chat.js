@@ -2,6 +2,7 @@ const config = require('../config');
 const logger = require('../utils/logger');
 const ai = require('./ai');
 const chatHistory = require('./chat-history');
+const escalationStore = require('./escalation-store');
 
 const ESCALATE_TAG = '[ESCALATE]';
 
@@ -20,6 +21,23 @@ const USER_ESCALATION_PHRASES = [
 function userAskedForHuman(text) {
   const lower = text.toLowerCase();
   return USER_ESCALATION_PHRASES.some(phrase => lower.includes(phrase));
+}
+
+/**
+ * Strip markdown formatting from AI response — Telegram plain text only.
+ */
+function stripMarkdown(text) {
+  return text
+    .replace(/^#{1,6}\s+/gm, '')       // headings
+    .replace(/\*\*\*(.*?)\*\*\*/g, '$1') // bold+italic
+    .replace(/\*\*(.*?)\*\*/g, '$1')     // bold
+    .replace(/\*(.*?)\*/g, '$1')         // italic
+    .replace(/```[\s\S]*?```/g, (m) => m.replace(/```\w*\n?/g, '').trim()) // code blocks → plain
+    .replace(/`([^`]+)`/g, '$1')         // inline code
+    .replace(/^---+$/gm, '')             // horizontal rules
+    .replace(/^[-*]\s+/gm, '- ')         // normalize list markers (keep readable)
+    .replace(/\n{3,}/g, '\n\n')          // collapse excessive newlines
+    .trim();
 }
 
 /**
@@ -75,11 +93,12 @@ async function notifyAdmins(bot, userId, username, userText) {
     `От пользователя: ${userLabel}\n` +
     `Вопрос: ${truncatedText}\n` +
     `Время: ${timestamp}\n\n` +
-    `Требуется ответ команды.`;
+    `Ответьте на это сообщение — ответ уйдёт пользователю.`;
 
   for (const adminId of config.escalationUserIds) {
     try {
-      await bot.telegram.sendMessage(adminId, alert);
+      const sent = await bot.telegram.sendMessage(adminId, alert);
+      escalationStore.storeEscalation(sent.message_id, userId);
     } catch (err) {
       logger.error('support-chat: failed to notify admin', { adminId, error: err.message });
     }
@@ -106,6 +125,14 @@ async function handle(ctx, msg, bot) {
     const history = await chatHistory.getHistory(userId, config.supportChat.historyLimit);
     logger.info('support-chat: step 1 OK', { userId, historyLen: history.length });
 
+    // ONE-REPLY MODE: only respond to the very first message in a new chat.
+    // Subsequent messages are silently skipped — dialog-tracker still collects
+    // everything for KB building via business.js.
+    if (history.length > 0) {
+      logger.info('support-chat: skipping (already replied once)', { userId });
+      return;
+    }
+
     // 2. Build messages array
     const messages = buildMessages(userText, history);
     logger.info('support-chat: step 2 — messages built', { userId, msgCount: messages.length });
@@ -121,14 +148,14 @@ async function handle(ctx, msg, bot) {
 
     // 4. Call OpenRouter
     logger.info('support-chat: step 4 — calling AI', { userId, model });
-    const response = await ai.chatCompletion(model, messages, { temperature: 0.4, maxTokens: 512 });
+    const response = await ai.chatCompletion(model, messages, { temperature: 0.4, maxTokens: 300 });
     logger.info('support-chat: step 4 OK', { userId, responseLen: response.length });
 
     // 5. Detect escalation: model tag OR user explicitly asked for human
     const hasModelTag = response.includes(ESCALATE_TAG);
     const hasUserRequest = userAskedForHuman(userText);
     const shouldEscalate = hasModelTag || hasUserRequest;
-    const cleanResponse = response.replaceAll(ESCALATE_TAG, '').trim();
+    const cleanResponse = stripMarkdown(response.replaceAll(ESCALATE_TAG, '').trim());
 
     // 6. Notify admins if escalated
     if (shouldEscalate) {
