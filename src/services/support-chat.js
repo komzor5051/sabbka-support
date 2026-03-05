@@ -6,6 +6,20 @@ const escalationStore = require('./escalation-store');
 
 const ESCALATE_TAG = '[ESCALATE]';
 
+// Per-user processing queue — ensures messages from the same user are handled
+// sequentially, so history is consistent even when messages arrive in rapid succession.
+const userQueues = new Map(); // userId -> Promise
+
+function enqueue(userId, task) {
+  const prev = userQueues.get(userId) || Promise.resolve();
+  const next = prev.then(task).catch(() => {});
+  userQueues.set(userId, next);
+  next.finally(() => {
+    if (userQueues.get(userId) === next) userQueues.delete(userId);
+  });
+  return next;
+}
+
 // Fallback: if user explicitly asks for a human, escalate even if model forgot the tag
 const USER_ESCALATION_PHRASES = [
   'позови человека', 'позовите человека',
@@ -106,85 +120,89 @@ async function notifyAdmins(bot, userId, username, userText) {
 }
 
 /**
- * Main handler — called from business.js for each USER message.
- * Silently fails on error to avoid disrupting KB building.
- *
- * @param {object} ctx     - Telegraf context (business_message)
- * @param {object} msg     - Raw business message object
- * @param {object} bot     - Telegraf bot instance (for admin notifications)
+ * Core logic — runs sequentially per user inside the queue.
  */
-async function handle(ctx, msg, bot) {
-  const userId = msg.chat.id; // Use chat.id as conversation key (same as dialog-tracker)
+async function _handle(ctx, msg, bot) {
+  const userId = msg.chat.id;
   const userText = msg.text;
 
   logger.info('support-chat: START', { userId, textLen: userText.length });
 
-  try {
-    // 1. Fetch conversation history
-    logger.info('support-chat: step 1 — getHistory', { userId });
-    const allHistory = await chatHistory.getHistory(userId, config.supportChat.historyLimit);
-    logger.info('support-chat: step 1 OK', { userId, historyLen: allHistory.length });
+  // 1. Save user message FIRST — so the next queued message sees it in history
+  await chatHistory.saveMessage(userId, 'user', userText);
 
-    // TWO-REPLY MODE: count only replies within current session (last 4 hours).
-    // If user comes back after 4h — treat as a new session, counter resets.
-    const SESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
-    const sessionCutoff = new Date(Date.now() - SESSION_WINDOW_MS);
-    const sessionHistory = allHistory.filter(m => new Date(m.created_at) >= sessionCutoff);
-    const repliesGiven = sessionHistory.filter(m => m.role === 'assistant').length;
-    if (repliesGiven >= 2) {
-      logger.info('support-chat: skipping (2 replies in current session)', { userId });
-      return;
-    }
+  // 2. Fetch conversation history (now includes the message we just saved)
+  logger.info('support-chat: step 2 — getHistory', { userId });
+  const allHistory = await chatHistory.getHistory(userId, config.supportChat.historyLimit);
+  logger.info('support-chat: step 2 OK', { userId, historyLen: allHistory.length });
 
-    // 2. Build messages array — strip created_at before passing to OpenRouter
-    const history = sessionHistory.map(({ role, content }) => ({ role, content }));
-    const messages = buildMessages(userText, history);
-    logger.info('support-chat: step 2 — messages built', { userId, msgCount: messages.length });
-
-    // 3. Select model — add :online for diagnostic queries
-    const model = needsOnline(userText)
-      ? config.openrouter.models.gemini + ':online'
-      : config.openrouter.models.gemini;
-
-    if (model.endsWith(':online')) {
-      logger.info('support-chat: using :online (Exa search)', { userId });
-    }
-
-    // 4. Call OpenRouter
-    logger.info('support-chat: step 4 — calling AI', { userId, model });
-    const response = await ai.chatCompletion(model, messages, { temperature: 0.4, maxTokens: 300 });
-    logger.info('support-chat: step 4 OK', { userId, responseLen: response.length });
-
-    // 5. Detect escalation: model tag OR user explicitly asked for human
-    const hasModelTag = response.includes(ESCALATE_TAG);
-    const hasUserRequest = userAskedForHuman(userText);
-    const shouldEscalate = hasModelTag || hasUserRequest;
-    const cleanResponse = stripMarkdown(response.replaceAll(ESCALATE_TAG, '').trim());
-
-    // 6. Notify admins if escalated
-    if (shouldEscalate) {
-      const reason = hasModelTag ? 'model_tag' : 'user_request';
-      logger.info('support-chat: escalating', { userId, reason });
-      const username = msg.from?.username || msg.chat?.username;
-      await notifyAdmins(bot, userId, username, userText);
-    }
-
-    // 7. Reply to user via business connection (required for Business API)
-    logger.info('support-chat: step 7 — sending reply', { userId });
-    const businessConnectionId = ctx.update?.business_message?.business_connection_id;
-    await ctx.telegram.sendMessage(msg.chat.id, cleanResponse, {
-      ...(businessConnectionId && { business_connection_id: businessConnectionId }),
-    });
-
-    // 8. Persist both turns to history
-    await chatHistory.saveMessage(userId, 'user', userText);
-    await chatHistory.saveMessage(userId, 'assistant', cleanResponse);
-
-    logger.info('support-chat: replied', { userId, escalated: shouldEscalate });
-  } catch (err) {
-    // Silent fail — human operator can still reply via @sabka_help manually
-    logger.error('support-chat: handle failed', { userId, error: err.message, stack: err.stack });
+  // TWO-REPLY MODE: count only replies within current session (last 4 hours).
+  // If user comes back after 4h — treat as a new session, counter resets.
+  const SESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
+  const sessionCutoff = new Date(Date.now() - SESSION_WINDOW_MS);
+  const sessionHistory = allHistory.filter(m => new Date(m.created_at) >= sessionCutoff);
+  const repliesGiven = sessionHistory.filter(m => m.role === 'assistant').length;
+  if (repliesGiven >= 2) {
+    logger.info('support-chat: skipping (2 replies in current session)', { userId });
+    return;
   }
+
+  // 3. Build messages array — strip created_at before passing to OpenRouter
+  // Exclude the last item (user message we just saved) since it's passed separately
+  const history = sessionHistory.slice(0, -1).map(({ role, content }) => ({ role, content }));
+  const messages = buildMessages(userText, history);
+  logger.info('support-chat: step 3 — messages built', { userId, msgCount: messages.length });
+
+  // 4. Select model — add :online for diagnostic queries
+  const model = needsOnline(userText)
+    ? config.openrouter.models.gemini + ':online'
+    : config.openrouter.models.gemini;
+
+  if (model.endsWith(':online')) {
+    logger.info('support-chat: using :online (Exa search)', { userId });
+  }
+
+  // 5. Call OpenRouter
+  logger.info('support-chat: step 5 — calling AI', { userId, model });
+  const response = await ai.chatCompletion(model, messages, { temperature: 0.4, maxTokens: 300 });
+  logger.info('support-chat: step 5 OK', { userId, responseLen: response.length });
+
+  // 6. Detect escalation: model tag OR user explicitly asked for human
+  const hasModelTag = response.includes(ESCALATE_TAG);
+  const hasUserRequest = userAskedForHuman(userText);
+  const shouldEscalate = hasModelTag || hasUserRequest;
+  const cleanResponse = stripMarkdown(response.replaceAll(ESCALATE_TAG, '').trim());
+
+  // 7. Notify admins if escalated
+  if (shouldEscalate) {
+    const reason = hasModelTag ? 'model_tag' : 'user_request';
+    logger.info('support-chat: escalating', { userId, reason });
+    const username = msg.from?.username || msg.chat?.username;
+    await notifyAdmins(bot, userId, username, userText);
+  }
+
+  // 8. Reply to user via business connection (required for Business API)
+  logger.info('support-chat: step 8 — sending reply', { userId });
+  const businessConnectionId = ctx.update?.business_message?.business_connection_id;
+  await ctx.telegram.sendMessage(msg.chat.id, cleanResponse, {
+    ...(businessConnectionId && { business_connection_id: businessConnectionId }),
+  });
+
+  // 9. Persist assistant reply to history
+  await chatHistory.saveMessage(userId, 'assistant', cleanResponse);
+
+  logger.info('support-chat: replied', { userId, escalated: shouldEscalate });
+}
+
+/**
+ * Public handle — enqueues per user to ensure sequential processing.
+ * Silently fails on error to avoid disrupting KB building.
+ */
+async function handle(ctx, msg, bot) {
+  const userId = msg.chat.id;
+  return enqueue(userId, () => _handle(ctx, msg, bot).catch((err) => {
+    logger.error('support-chat: handle failed', { userId, error: err.message, stack: err.stack });
+  }));
 }
 
 module.exports = { handle };
