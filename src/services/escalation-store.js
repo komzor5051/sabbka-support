@@ -31,9 +31,9 @@ async function checkDbAvailable() {
   return dbAvailable;
 }
 
-async function storeEscalation(notificationMsgId, userChatId) {
-  // Always store in cache
-  cache.set(notificationMsgId, { userChatId, timestamp: Date.now() });
+async function storeEscalation(notificationMsgId, userChatId, userText) {
+  // Always store in cache (including original user question for KB learning)
+  cache.set(notificationMsgId, { userChatId, userText: userText || '', timestamp: Date.now() });
   logger.info('escalation-store: stored', { notificationMsgId, userChatId });
 
   // Persist to DB if available
@@ -44,6 +44,7 @@ async function storeEscalation(notificationMsgId, userChatId) {
         .upsert({
           notification_msg_id: notificationMsgId,
           user_chat_id: userChatId,
+          user_text: userText || '',
         });
       if (error) {
         logger.error('escalation-store: DB write failed', { error: error.message });
@@ -71,13 +72,13 @@ async function getEscalation(notificationMsgId) {
       const cutoff = new Date(Date.now() - TTL_MS).toISOString();
       const { data, error } = await supabase
         .from('escalations')
-        .select('user_chat_id, created_at')
+        .select('user_chat_id, user_text, created_at')
         .eq('notification_msg_id', notificationMsgId)
         .gte('created_at', cutoff)
         .single();
 
       if (!error && data) {
-        const entry = { userChatId: data.user_chat_id, timestamp: new Date(data.created_at).getTime() };
+        const entry = { userChatId: data.user_chat_id, userText: data.user_text || '', timestamp: new Date(data.created_at).getTime() };
         cache.set(notificationMsgId, entry); // Warm cache
         return entry;
       }

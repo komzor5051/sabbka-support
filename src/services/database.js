@@ -4,18 +4,21 @@ const logger = require('../utils/logger');
 
 const supabase = createClient(config.supabase.url, config.supabase.serviceKey);
 
-async function insertDialog({ telegramMessageId, telegramUserId, category, fullDialog, summaryProblem, summarySolution, embedding }) {
+async function insertDialog({ telegramMessageId, telegramUserId, category, fullDialog, summaryProblem, summarySolution, embedding, quality }) {
+  const row = {
+    telegram_message_id: telegramMessageId,
+    telegram_user_id: telegramUserId,
+    category,
+    full_dialog: fullDialog,
+    summary_problem: summaryProblem,
+    summary_solution: summarySolution,
+    embedding,
+  };
+  if (quality !== undefined) row.quality = quality;
+
   const { data, error } = await supabase
     .from('support_kb')
-    .insert({
-      telegram_message_id: telegramMessageId,
-      telegram_user_id: telegramUserId,
-      category,
-      full_dialog: fullDialog,
-      summary_problem: summaryProblem,
-      summary_solution: summarySolution,
-      embedding,
-    })
+    .insert(row)
     .select('id')
     .single();
 

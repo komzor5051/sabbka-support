@@ -260,7 +260,7 @@ async function notifyAdmins(bot, userId, username, userText) {
   for (const adminId of config.escalationUserIds) {
     try {
       const sent = await bot.telegram.sendMessage(adminId, alert);
-      escalationStore.storeEscalation(sent.message_id, userId);
+      escalationStore.storeEscalation(sent.message_id, userId, userText);
     } catch (err) {
       logger.error('support-chat: failed to notify admin', { adminId, error: err.message });
     }

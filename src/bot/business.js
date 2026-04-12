@@ -26,6 +26,11 @@ async function processCompletedDialog({ userId, firstMessageId, fullDialog, mess
     const embeddingText = `${analysis.summary_problem} ${analysis.summary_solution}`;
     const embedding = await ai.generateEmbedding(embeddingText);
 
+    // Quality: escalated dialogs = 0.5, normal = 1.0
+    const wasEscalated = fullDialog.includes('[ESCALATE]') ||
+      /передаю команде|зову человека|позову человека/i.test(fullDialog);
+    const quality = wasEscalated ? 0.5 : 1.0;
+
     await db.insertDialog({
       telegramMessageId: firstMessageId,
       telegramUserId: userId,
@@ -34,6 +39,7 @@ async function processCompletedDialog({ userId, firstMessageId, fullDialog, mess
       summaryProblem: analysis.summary_problem,
       summarySolution: analysis.summary_solution,
       embedding,
+      quality,
     });
 
     logger.info('Dialog processed and saved', {

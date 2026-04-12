@@ -62,9 +62,10 @@ async function saveAnswerToKB(originalQuery, answer) {
       summaryProblem: analysis.summary_problem,
       summarySolution: analysis.summary_solution,
       embedding,
+      quality: 1.5, // Operator-verified answer — highest quality
     });
 
-    logger.info('Answer saved to KB', { category: analysis.category });
+    logger.info('Answer saved to KB', { category: analysis.category, quality: 1.5 });
     return true;
   } catch (err) {
     logger.error('Failed to save answer to KB', { error: err.message });
@@ -193,7 +194,7 @@ async function handleForward(ctx) {
 function setupHandlers(bot) {
   // Operator reply forwarding — BEFORE auth-protected handlers
   // When an admin replies to an escalation notification, forward their text to the user
-  bot.on('text', (ctx, next) => {
+  bot.on('text', async (ctx, next) => {
     const senderId = ctx.from?.id;
     const replyTo = ctx.message?.reply_to_message;
 
@@ -202,12 +203,13 @@ function setupHandlers(bot) {
       return next();
     }
 
-    const escalation = escalationStore.getEscalation(replyTo.message_id);
+    const escalation = await escalationStore.getEscalation(replyTo.message_id);
     if (!escalation) {
       return next(); // Not a reply to an escalation notification
     }
 
     const userChatId = escalation.userChatId;
+    const userText = escalation.userText;
     const bcId = escalationStore.getBusinessConnectionId();
     const replyText = ctx.message.text;
 
@@ -216,15 +218,21 @@ function setupHandlers(bot) {
       return ctx.reply('Ошибка: business_connection_id ещё не получен. Подождите пока придёт хотя бы одно сообщение от пользователя.');
     }
 
-    ctx.telegram.sendMessage(userChatId, replyText, { business_connection_id: bcId })
-      .then(() => {
-        ctx.reply('Ответ доставлен');
-        logger.info('escalation-reply: forwarded to user', { userChatId, adminId: senderId });
-      })
-      .catch((err) => {
-        ctx.reply('Ошибка доставки: ' + err.message);
-        logger.error('escalation-reply: failed', { userChatId, error: err.message });
-      });
+    try {
+      await ctx.telegram.sendMessage(userChatId, replyText, { business_connection_id: bcId });
+      await ctx.reply('Ответ доставлен');
+      logger.info('escalation-reply: forwarded to user', { userChatId, adminId: senderId });
+
+      // Self-learning: save operator's answer to KB for future RAG retrieval
+      if (userText) {
+        saveAnswerToKB(userText, replyText).then((saved) => {
+          if (saved) logger.info('escalation-reply: operator answer saved to KB', { userChatId });
+        });
+      }
+    } catch (err) {
+      await ctx.reply('Ошибка доставки: ' + err.message);
+      logger.error('escalation-reply: failed', { userChatId, error: err.message });
+    }
   });
 
   // /skip — clear pending context, next message is a new query

@@ -15,7 +15,8 @@ CREATE TABLE support_kb (
   summary_problem TEXT,
   summary_solution TEXT,
   embedding VECTOR(1536),
-  last_synced_to_sheets TIMESTAMPTZ
+  last_synced_to_sheets TIMESTAMPTZ,
+  quality FLOAT DEFAULT 1.0
 );
 
 -- Dynamic categories
@@ -64,7 +65,7 @@ LANGUAGE SQL AS $$
   WHERE embedding IS NOT NULL
     AND (filter_category IS NULL OR category = filter_category)
     AND (1 - (embedding <=> query_embedding)) >= similarity_threshold
-  ORDER BY embedding <=> query_embedding
+  ORDER BY (1 - (embedding <=> query_embedding)) * COALESCE(quality, 1.0) DESC
   LIMIT match_count;
 $$;
 
@@ -86,6 +87,7 @@ CREATE INDEX ON chat_history (user_id, created_at);
 CREATE TABLE IF NOT EXISTS escalations (
   notification_msg_id BIGINT PRIMARY KEY,
   user_chat_id BIGINT NOT NULL,
+  user_text TEXT DEFAULT '',
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
