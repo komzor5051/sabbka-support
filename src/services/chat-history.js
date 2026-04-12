@@ -35,7 +35,28 @@ async function saveMessage(userId, role, content) {
 
   if (error) {
     logger.error('chat-history: saveMessage failed', { userId, role, error: error.message });
+    throw new Error(`saveMessage failed: ${error.message}`);
   }
 }
 
-module.exports = { getHistory, saveMessage };
+/**
+ * Count assistant replies for a user since a given date.
+ * Uses a DB-level count — not limited by getHistory's row limit.
+ */
+async function countRepliesInWindow(userId, since) {
+  const { count, error } = await supabase
+    .from('chat_history')
+    .select('*', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .eq('role', 'assistant')
+    .gte('created_at', since.toISOString());
+
+  if (error) {
+    logger.error('chat-history: countRepliesInWindow failed', { userId, error: error.message });
+    return 0;
+  }
+
+  return count || 0;
+}
+
+module.exports = { getHistory, saveMessage, countRepliesInWindow };

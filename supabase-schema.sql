@@ -81,3 +81,26 @@ CREATE TABLE chat_history (
 );
 
 CREATE INDEX ON chat_history (user_id, created_at);
+
+-- Escalation store (persists across restarts)
+CREATE TABLE IF NOT EXISTS escalations (
+  notification_msg_id BIGINT PRIMARY KEY,
+  user_chat_id BIGINT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Auto-cleanup: entries older than 48h
+CREATE INDEX ON escalations (created_at);
+
+-- Dialog buffer (persists across restarts)
+CREATE TABLE IF NOT EXISTS dialog_buffer (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  sender TEXT NOT NULL,
+  text TEXT NOT NULL,
+  message_id BIGINT,
+  message_date TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX ON dialog_buffer (user_id, created_at);

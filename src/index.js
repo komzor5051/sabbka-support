@@ -36,7 +36,10 @@ async function main() {
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
 
-  // 5. Launch bot (polling mode)
+  // 5. Recover any orphaned dialogs from a previous crash
+  await dialogTracker.recoverOrphaned();
+
+  // 6. Launch bot (polling mode)
   // bot.launch() hangs in Telegraf 4.16 — use deleteWebhook + startPolling
   await bot.telegram.deleteWebhook({ drop_pending_updates: true });
   bot.startPolling();

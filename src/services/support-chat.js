@@ -277,23 +277,32 @@ async function _handle(ctx, msg, bot) {
   logger.info('support-chat: START', { userId, textLen: userText.length });
 
   // 1. Save user message FIRST — so the next queued message sees it in history
-  await chatHistory.saveMessage(userId, 'user', userText);
+  // If this fails, tell the user and bail — don't proceed with a broken history
+  try {
+    await chatHistory.saveMessage(userId, 'user', userText);
+  } catch (err) {
+    logger.error('support-chat: failed to save user message', { userId, error: err.message });
+    const businessConnectionId = ctx.update?.business_message?.business_connection_id;
+    await ctx.telegram.sendMessage(msg.chat.id, 'Произошла техническая ошибка. Попробуйте написать ещё раз через минуту.', {
+      ...(businessConnectionId && { business_connection_id: businessConnectionId }),
+    }).catch(() => {});
+    return;
+  }
 
-  // 2. Fetch history + context (KB sections + past cases) in parallel
-  logger.info('support-chat: step 2 — getHistory + retrieveContext', { userId });
-  const [allHistory, retrievedContext] = await Promise.all([
-    chatHistory.getHistory(userId, config.supportChat.historyLimit),
-    retrieveContext(userText),
-  ]);
-  logger.info('support-chat: step 2 OK', { userId, historyLen: allHistory.length });
-
-  // THREE-REPLY MODE: count only replies within current session (last 4 hours).
-  // Reply 1-2: normal AI responses. Reply 3: forced escalation to human.
-  // After 3 replies: silent skip.
+  // 2. Fetch history + context + reply count in parallel
+  logger.info('support-chat: step 2 — getHistory + retrieveContext + countReplies', { userId });
   const SESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
   const sessionCutoff = new Date(Date.now() - SESSION_WINDOW_MS);
-  const sessionHistory = allHistory.filter(m => new Date(m.created_at) >= sessionCutoff);
-  const repliesGiven = sessionHistory.filter(m => m.role === 'assistant').length;
+  const [allHistory, retrievedContext, repliesGiven] = await Promise.all([
+    chatHistory.getHistory(userId, config.supportChat.historyLimit),
+    retrieveContext(userText),
+    chatHistory.countRepliesInWindow(userId, sessionCutoff),
+  ]);
+  logger.info('support-chat: step 2 OK', { userId, historyLen: allHistory.length, repliesGiven });
+
+  // THREE-REPLY MODE: exact count from DB (not limited by historyLimit).
+  // Reply 1-2: normal AI responses. Reply 3: forced escalation to human.
+  // After 3 replies: silent skip.
 
   if (repliesGiven >= 3) {
     logger.info('support-chat: skipping (3 replies in current session)', { userId });
@@ -308,7 +317,8 @@ async function _handle(ctx, msg, bot) {
     await ctx.telegram.sendMessage(msg.chat.id, escalationMsg, {
       ...(businessConnectionId && { business_connection_id: businessConnectionId }),
     });
-    await chatHistory.saveMessage(userId, 'assistant', escalationMsg);
+    try { await chatHistory.saveMessage(userId, 'assistant', escalationMsg); }
+    catch (err) { logger.error('support-chat: failed to save escalation reply', { userId, error: err.message }); }
     const username = msg.from?.username || msg.chat?.username;
     await notifyAdmins(bot, userId, username, userText);
     logger.info('support-chat: forced escalation done', { userId });
@@ -316,8 +326,9 @@ async function _handle(ctx, msg, bot) {
   }
 
   // 3. Build messages array — strip created_at before passing to OpenRouter
-  // Exclude the last item (user message we just saved) since it's passed separately
-  const history = sessionHistory.slice(0, -1).map(({ role, content }) => ({ role, content }));
+  // Filter to current session, exclude the last item (user message we just saved)
+  const sessionMessages = allHistory.filter(m => new Date(m.created_at) >= sessionCutoff);
+  const history = sessionMessages.slice(0, -1).map(({ role, content }) => ({ role, content }));
   const messages = buildMessages(userText, history, retrievedContext);
   logger.info('support-chat: step 3 — messages built', { userId, msgCount: messages.length });
 
@@ -363,8 +374,12 @@ async function _handle(ctx, msg, bot) {
     ...(businessConnectionId && { business_connection_id: businessConnectionId }),
   });
 
-  // 9. Persist assistant reply to history
-  await chatHistory.saveMessage(userId, 'assistant', cleanResponse);
+  // 9. Persist assistant reply to history (non-fatal — response already sent)
+  try {
+    await chatHistory.saveMessage(userId, 'assistant', cleanResponse);
+  } catch (err) {
+    logger.error('support-chat: failed to save assistant reply', { userId, error: err.message });
+  }
 
   logger.info('support-chat: replied', { userId, escalated: shouldEscalate });
 }
