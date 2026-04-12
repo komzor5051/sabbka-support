@@ -237,6 +237,7 @@ function setupHandlers(bot) {
   bot.action('send_answer', async (ctx) => {
     await ctx.answerCbQuery();
     const userId = ctx.from.id;
+    if (!config.allowedUserIds.includes(userId)) return;
     const pending = getPendingContext(userId);
 
     if (!pending || !pending.answer) {
@@ -258,6 +259,7 @@ function setupHandlers(bot) {
   bot.action('edit_answer', async (ctx) => {
     await ctx.answerCbQuery();
     const userId = ctx.from.id;
+    if (!config.allowedUserIds.includes(userId)) return;
     const pending = getPendingContext(userId);
 
     if (!pending) {
@@ -273,6 +275,7 @@ function setupHandlers(bot) {
   bot.action('regenerate_answer', async (ctx) => {
     await ctx.answerCbQuery('🔄 Генерирую новый вариант...');
     const userId = ctx.from.id;
+    if (!config.allowedUserIds.includes(userId)) return;
     const pending = getPendingContext(userId);
 
     if (!pending) {

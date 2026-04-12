@@ -2,9 +2,20 @@ const winston = require('winston');
 const path = require('path');
 const fs = require('fs');
 
-// Ensure logs directory exists
-const logsDir = path.join(process.cwd(), 'logs');
-fs.mkdirSync(logsDir, { recursive: true });
+// File transport: optional, safe on read-only FS (Railway ephemeral disk)
+const transports = [new winston.transports.Console()];
+
+try {
+  const logsDir = path.join(process.cwd(), 'logs');
+  fs.mkdirSync(logsDir, { recursive: true });
+  transports.push(new winston.transports.File({
+    filename: path.join(logsDir, 'bot.log'),
+    maxsize: 5 * 1024 * 1024, // 5MB
+    maxFiles: 3,
+  }));
+} catch (e) {
+  // Read-only filesystem (Railway) — console-only logging
+}
 
 const logger = winston.createLogger({
   level: 'info',
@@ -15,14 +26,7 @@ const logger = winston.createLogger({
       return `${timestamp} [${level.toUpperCase()}] ${message}${metaStr}`;
     })
   ),
-  transports: [
-    new winston.transports.Console(),
-    new winston.transports.File({
-      filename: path.join(process.cwd(), 'logs', 'bot.log'),
-      maxsize: 5 * 1024 * 1024, // 5MB
-      maxFiles: 3,
-    }),
-  ],
+  transports,
 });
 
 module.exports = logger;

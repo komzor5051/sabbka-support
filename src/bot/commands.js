@@ -4,6 +4,49 @@ const ai = require('../services/ai');
 const { formatStats, formatModels } = require('../utils/formatters');
 const { authMiddleware } = require('./auth');
 
+/**
+ * Shared recalculation logic for /change, /recalculate, /rebuild_kb Step B.
+ * Processes records sequentially with delay to avoid rate limits.
+ */
+async function recalculateRecords(records, categories, rules, ctx) {
+  const validCats = categories.map(c => c.name);
+  let processed = 0;
+  let failed = 0;
+
+  for (const record of records) {
+    try {
+      const analysis = await ai.analyzeDialog(record.full_dialog, categories, rules);
+      if (!validCats.includes(analysis.category)) analysis.category = 'прочее';
+
+      const embeddingText = `${analysis.summary_problem} ${analysis.summary_solution}`;
+      const embedding = await ai.generateEmbedding(embeddingText);
+
+      await db.updateRecord(record.id, {
+        category: analysis.category,
+        summaryProblem: analysis.summary_problem,
+        summarySolution: analysis.summary_solution,
+        embedding,
+      });
+
+      processed++;
+    } catch (err) {
+      failed++;
+      logger.error('Failed to recalculate record', { id: record.id, error: err.message });
+    }
+
+    if ((processed + failed) % 10 === 0) {
+      try {
+        await ctx.reply(`🔄 ${processed + failed}/${records.length} (ок: ${processed}, ошибок: ${failed})`);
+      } catch (e) { /* Telegram rate limit, ignore */ }
+    }
+
+    // 500ms delay between records to avoid OpenRouter rate limits
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  return { processed, failed };
+}
+
 function setupCommands(bot) {
   // /start — no auth (public info)
   bot.command('start', (ctx) => {
@@ -116,35 +159,8 @@ function setupCommands(bot) {
         return ctx.reply('✅ Правило сохранено. База пуста — пересчёт не нужен.');
       }
 
-      let processed = 0;
-      for (const record of records) {
-        try {
-          const analysis = await ai.analyzeDialog(record.full_dialog, categories, rules);
-
-          const validCats = categories.map(c => c.name);
-          if (!validCats.includes(analysis.category)) {
-            analysis.category = 'прочее';
-          }
-
-          const embedding = await ai.generateEmbedding(record.full_dialog);
-
-          await db.updateRecord(record.id, {
-            category: analysis.category,
-            summaryProblem: analysis.summary_problem,
-            summarySolution: analysis.summary_solution,
-            embedding,
-          });
-
-          processed++;
-          if (processed % 10 === 0) {
-            await ctx.reply(`🔄 Обработано ${processed}/${records.length}...`);
-          }
-        } catch (err) {
-          logger.error('Failed to recalculate record', { id: record.id, error: err.message });
-        }
-      }
-
-      await ctx.reply(`✅ Пересчет завершен! Обработано: ${processed}/${records.length} записей.`);
+      const { processed, failed } = await recalculateRecords(records, categories, rules, ctx);
+      await ctx.reply(`✅ Пересчет завершен! Обработано: ${processed}, ошибок: ${failed}, всего: ${records.length}.`);
     } catch (err) {
       logger.error('/change failed', { error: err.message });
       await ctx.reply('❌ Ошибка при пересчете.');
@@ -165,35 +181,8 @@ function setupCommands(bot) {
       const categories = await db.getCategories();
       const rules = await db.getRules();
 
-      let processed = 0;
-      for (const record of records) {
-        try {
-          const analysis = await ai.analyzeDialog(record.full_dialog, categories, rules);
-
-          const validCats = categories.map(c => c.name);
-          if (!validCats.includes(analysis.category)) {
-            analysis.category = 'прочее';
-          }
-
-          const embedding = await ai.generateEmbedding(record.full_dialog);
-
-          await db.updateRecord(record.id, {
-            category: analysis.category,
-            summaryProblem: analysis.summary_problem,
-            summarySolution: analysis.summary_solution,
-            embedding,
-          });
-
-          processed++;
-          if (processed % 10 === 0) {
-            await ctx.reply(`🔄 Обработано ${processed}/${records.length}...`);
-          }
-        } catch (err) {
-          logger.error('Failed to recalculate record', { id: record.id, error: err.message });
-        }
-      }
-
-      await ctx.reply(`✅ Пересчет завершён! Обработано: ${processed}/${records.length} записей.`);
+      const { processed, failed } = await recalculateRecords(records, categories, rules, ctx);
+      await ctx.reply(`✅ Пересчет завершён! Обработано: ${processed}, ошибок: ${failed}, всего: ${records.length}.`);
     } catch (err) {
       logger.error('/recalculate failed', { error: err.message });
       await ctx.reply('❌ Ошибка при пересчете.');
@@ -240,6 +229,7 @@ function setupCommands(bot) {
       );
 
       let added = 0;
+      let addFailed = 0;
       for (let i = 0; i < validSessions.length; i++) {
         const session = validSessions[i];
         const dialogText = session
@@ -265,45 +255,26 @@ function setupCommands(bot) {
 
           added++;
           if (added % 5 === 0) {
-            await ctx.reply(`Шаг A: обработано ${added}/${validSessions.length} сессий`);
+            try {
+              await ctx.reply(`Шаг A: ${added}/${validSessions.length} сессий`);
+            } catch (e) { /* Telegram rate limit */ }
           }
         } catch (err) {
+          addFailed++;
           logger.error('rebuild_kb: failed to process session', { i, error: err.message });
         }
+
+        await new Promise(r => setTimeout(r, 500));
       }
 
-      await ctx.reply(`Шаг A завершён: добавлено ${added} из ${validSessions.length} сессий\n\nШаг B: переклассификация существующих записей...`);
+      await ctx.reply(`Шаг A завершён: добавлено ${added}, ошибок ${addFailed}\n\nШаг B: переклассификация...`);
 
       // === STEP B: reclassify existing support_kb records ===
       const existing = await db.getAllRecords();
-      let reclassified = 0;
-
-      for (const record of existing) {
-        try {
-          const analysis = await ai.analyzeDialog(record.full_dialog, categories, rules);
-          if (!validCats.includes(analysis.category)) analysis.category = 'прочее';
-
-          const embeddingText = `${analysis.summary_problem} ${analysis.summary_solution}`;
-          const embedding = await ai.generateEmbedding(embeddingText);
-
-          await db.updateRecord(record.id, {
-            category: analysis.category,
-            summaryProblem: analysis.summary_problem,
-            summarySolution: analysis.summary_solution,
-            embedding,
-          });
-
-          reclassified++;
-          if (reclassified % 10 === 0) {
-            await ctx.reply(`Шаг B: переклассифицировано ${reclassified}/${existing.length}`);
-          }
-        } catch (err) {
-          logger.error('rebuild_kb: failed to reclassify record', { id: record.id, error: err.message });
-        }
-      }
+      const { processed, failed } = await recalculateRecords(existing, categories, rules, ctx);
 
       await ctx.reply(
-        `✅ Готово.\nДобавлено из chat_history: ${added}\nПереклассифицировано: ${reclassified}/${existing.length}`
+        `✅ Готово.\nДобавлено из chat_history: ${added}\nПереклассифицировано: ${processed}/${existing.length}, ошибок: ${failed}`
       );
     } catch (err) {
       logger.error('/rebuild_kb failed', { error: err.message });

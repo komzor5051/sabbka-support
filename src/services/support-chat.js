@@ -1,6 +1,7 @@
 const config = require('../config');
 const logger = require('../utils/logger');
 const ai = require('./ai');
+const db = require('./database');
 const chatHistory = require('./chat-history');
 const escalationStore = require('./escalation-store');
 
@@ -64,27 +65,79 @@ function needsOnline(text) {
 }
 
 /**
- * Build the messages array for OpenRouter:
- * [system prompt + KB] + [history] + [new user message]
+ * Retrieve relevant KB sections + similar past cases in one embedding call.
+ * Returns { kbSectionsText, pastCasesText }.
  */
-function buildMessages(userText, history) {
-  let knowledgeBase;
-  try {
-    knowledgeBase = config.supportChat.knowledgeBase;
-  } catch (err) {
-    logger.error('support-chat: failed to read knowledge-base.md', { error: err.message });
-    knowledgeBase = '(база знаний недоступна)';
-  }
+async function retrieveContext(userText) {
+  const empty = { kbSectionsText: '', pastCasesText: '' };
 
+  // Skip retrieval for very short messages (greetings, "ок", etc.)
+  if (!userText || userText.trim().length < 15) return empty;
+
+  try {
+    // One embedding, two parallel searches
+    const embedding = await ai.generateEmbedding(userText);
+    const [sections, cases] = await Promise.all([
+      db.searchKbSections(embedding, 2, 0.50),
+      db.searchSimilar(embedding, 3, null, 0.70),
+    ]);
+
+    // Format KB sections
+    let kbSectionsText = '';
+    if (sections && sections.length > 0) {
+      kbSectionsText = sections.map(s => s.content).join('\n\n---\n\n');
+      logger.info('support-chat: KB sections retrieved', { count: sections.length, ids: sections.map(s => s.id) });
+    }
+
+    // Format past cases
+    let pastCasesText = '';
+    if (cases && cases.length > 0) {
+      const MAX_CHARS = 400;
+      const trim = (s) => s && s.length > MAX_CHARS ? s.substring(0, MAX_CHARS) + '…' : s;
+      const block = cases.map((c, i) => {
+        const sim = Math.round(c.similarity * 100);
+        return `Кейс ${i + 1} (${sim}%):\nПроблема: ${trim(c.summary_problem)}\nРешение: ${trim(c.summary_solution)}`;
+      }).join('\n\n');
+      pastCasesText = `\n\nПОХОЖИЕ ПРОШЛЫЕ КЕЙСЫ (референс, НЕ цитируй дословно):\n${block}`;
+    }
+
+    return { kbSectionsText, pastCasesText };
+  } catch (err) {
+    logger.error('support-chat: retrieval failed', { error: err.message });
+    return empty;
+  }
+}
+
+/**
+ * Build the messages array for OpenRouter:
+ * [system prompt (core) + relevant KB sections + past cases] + [history] + [user message]
+ *
+ * System prompt = rules, escalation, tone (~5K tokens, always present)
+ * KB sections = 2 most relevant sections (~2K tokens, selective)
+ * Past cases = 3 similar past dialogs (~1K tokens, selective)
+ * Total: ~8K tokens instead of ~22K
+ */
+function buildMessages(userText, history, retrievedContext) {
   let systemPromptTemplate;
   try {
     systemPromptTemplate = config.supportChat.systemPrompt;
   } catch (err) {
     logger.error('support-chat: failed to read system-prompt.md', { error: err.message });
-    systemPromptTemplate = 'Ты — ассистент поддержки Сабка. {knowledge_base}';
+    systemPromptTemplate = 'Ты — ассистент поддержки Сабка.';
   }
 
-  const systemContent = systemPromptTemplate.replace('{knowledge_base}', knowledgeBase);
+  // System prompt without {knowledge_base} — KB is now retrieved selectively
+  let systemContent = systemPromptTemplate.replace('{knowledge_base}', '');
+
+  // Inject relevant KB sections
+  if (retrievedContext.kbSectionsText) {
+    systemContent += '\n\n---\nРЕЛЕВАНТНЫЕ РАЗДЕЛЫ БАЗЫ ЗНАНИЙ:\n\n' + retrievedContext.kbSectionsText;
+  }
+
+  // Inject past cases
+  if (retrievedContext.pastCasesText) {
+    systemContent += '\n\n---' + retrievedContext.pastCasesText;
+  }
 
   return [
     { role: 'system', content: systemContent },
@@ -131,9 +184,12 @@ async function _handle(ctx, msg, bot) {
   // 1. Save user message FIRST — so the next queued message sees it in history
   await chatHistory.saveMessage(userId, 'user', userText);
 
-  // 2. Fetch conversation history (now includes the message we just saved)
-  logger.info('support-chat: step 2 — getHistory', { userId });
-  const allHistory = await chatHistory.getHistory(userId, config.supportChat.historyLimit);
+  // 2. Fetch history + context (KB sections + past cases) in parallel
+  logger.info('support-chat: step 2 — getHistory + retrieveContext', { userId });
+  const [allHistory, retrievedContext] = await Promise.all([
+    chatHistory.getHistory(userId, config.supportChat.historyLimit),
+    retrieveContext(userText),
+  ]);
   logger.info('support-chat: step 2 OK', { userId, historyLen: allHistory.length });
 
   // TWO-REPLY MODE: count only replies within current session (last 4 hours).
@@ -150,7 +206,7 @@ async function _handle(ctx, msg, bot) {
   // 3. Build messages array — strip created_at before passing to OpenRouter
   // Exclude the last item (user message we just saved) since it's passed separately
   const history = sessionHistory.slice(0, -1).map(({ role, content }) => ({ role, content }));
-  const messages = buildMessages(userText, history);
+  const messages = buildMessages(userText, history, retrievedContext);
   logger.info('support-chat: step 3 — messages built', { userId, msgCount: messages.length });
 
   // 4. Select model — add :online for diagnostic queries

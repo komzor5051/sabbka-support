@@ -36,6 +36,7 @@ function getBusinessConnectionId() {
 }
 
 // Periodic cleanup of expired entries
+// .unref() so this interval doesn't prevent clean Node.js exit
 setInterval(() => {
   const now = Date.now();
   let cleaned = 0;
@@ -48,7 +49,7 @@ setInterval(() => {
   if (cleaned > 0) {
     logger.info('escalation-store: cleanup', { cleaned, remaining: escalations.size });
   }
-}, CLEANUP_INTERVAL_MS);
+}, CLEANUP_INTERVAL_MS).unref();
 
 module.exports = {
   storeEscalation,

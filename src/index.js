@@ -30,8 +30,7 @@ async function main() {
   const shutdown = async (signal) => {
     logger.info(`Received ${signal}, shutting down...`);
     await dialogTracker.flushAll();
-    bot.stop(signal);
-    process.exit(0);
+    await bot.stop(signal);
   };
 
   process.once('SIGINT', () => shutdown('SIGINT'));

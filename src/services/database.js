@@ -206,9 +206,25 @@ async function exportRecords(limit = 50) {
   return data || [];
 }
 
+async function searchKbSections(queryEmbedding, matchCount = 2, threshold = 0.40) {
+  const { data, error } = await supabase.rpc('search_kb_sections', {
+    query_embedding: queryEmbedding,
+    match_count: matchCount,
+    similarity_threshold: threshold,
+  });
+
+  if (error) {
+    logger.error('KB sections search failed', { error: error.message });
+    throw error;
+  }
+
+  return data || [];
+}
+
 module.exports = {
   insertDialog,
   searchSimilar,
+  searchKbSections,
   getStats,
   getUnsyncedRecords,
   markAsSynced,

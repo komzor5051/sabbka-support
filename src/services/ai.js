@@ -4,10 +4,35 @@ const logger = require('../utils/logger');
 const OPENROUTER_BASE = config.openrouter.baseUrl;
 const API_KEY = config.openrouter.apiKey;
 
+/**
+ * Fetch with retry + exponential backoff for 429/5xx.
+ */
+async function fetchWithRetry(url, options, maxRetries = 3) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const res = await fetch(url, options);
+
+    if (res.status === 429 || res.status >= 500) {
+      if (attempt === maxRetries) {
+        const text = await res.text();
+        throw new Error(`OpenRouter ${res.status} after ${maxRetries + 1} attempts: ${text}`);
+      }
+      const retryAfter = res.headers.get('retry-after');
+      const delay = retryAfter
+        ? parseInt(retryAfter, 10) * 1000
+        : Math.min(1000 * 2 ** attempt, 30000);
+      logger.warn('OpenRouter rate limit, retrying', { status: res.status, attempt: attempt + 1, delay_ms: delay });
+      await new Promise(r => setTimeout(r, delay));
+      continue;
+    }
+
+    return res;
+  }
+}
+
 async function chatCompletion(model, messages, { temperature = 0.3, maxTokens = 1024 } = {}) {
   const start = Date.now();
 
-  const res = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+  const res = await fetchWithRetry(`${OPENROUTER_BASE}/chat/completions`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${API_KEY}`,
@@ -39,6 +64,11 @@ async function chatCompletion(model, messages, { temperature = 0.3, maxTokens = 
     elapsed_ms: elapsed,
   });
 
+  if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+    logger.error('OpenRouter empty response', { data });
+    throw new Error('OpenRouter returned empty choices');
+  }
+
   return data.choices[0].message.content;
 }
 
@@ -52,7 +82,7 @@ function truncateForEmbedding(text) {
 
 async function generateEmbedding(text) {
   const truncated = truncateForEmbedding(text);
-  const res = await fetch(`${OPENROUTER_BASE}/embeddings`, {
+  const res = await fetchWithRetry(`${OPENROUTER_BASE}/embeddings`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${API_KEY}`,
@@ -82,14 +112,13 @@ async function analyzeDialog(fullDialog, categories, rules) {
 
   const prompt = `Проанализируй диалог из службы поддержки. Верни JSON (без markdown):
 {
-  "summary_problem": "подробное описание проблемы пользователя со всеми деталями, контекстом и шагами воспроизведения (5-15 предложений)",
-  "summary_solution": "подробное описание решения, что именно посоветовали, какие шаги предложили, чем закончился диалог (5-15 предложений)",
+  "summary_problem": "суть проблемы пользователя (3-5 предложений, конкретно, без воды)",
+  "summary_solution": "что посоветовали и чем закончилось (3-5 предложений, конкретные шаги)",
   "category": "одна из категорий ниже"
 }
 
-ВАЖНО: summary_problem и summary_solution должны быть МАКСИМАЛЬНО подробными и конкретными.
-Включай все детали из диалога: конкретные ошибки, названия моделей, действия пользователя, точные формулировки решения.
-НЕ обобщай, НЕ абстрагируй — сохраняй конкретику.
+ВАЖНО: будь конкретным но кратким. Включай ключевые детали: модель, ошибку, действие.
+НЕ пиши "пользователь обратился в службу поддержки" — сразу к сути.
 
 Доступные категории:
 ${categoryList}
