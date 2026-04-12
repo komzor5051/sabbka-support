@@ -6,6 +6,7 @@ const DialogTracker = require('./services/dialog-tracker');
 const { processCompletedDialog, setupBusinessHandlers } = require('./bot/business');
 const { setupHandlers } = require('./bot/handlers');
 const { setupCommands } = require('./bot/commands');
+const { startBackupSchedule } = require('./services/backup');
 
 async function main() {
   logger.info('Starting Sabka Support KB Bot...');
@@ -44,6 +45,9 @@ async function main() {
   await bot.telegram.deleteWebhook({ drop_pending_updates: true });
   bot.startPolling();
   logger.info('Bot is running! Polling for updates...');
+
+  // 7. Start periodic backup (async, non-blocking)
+  startBackupSchedule();
   logger.info(`Allowed users: ${config.allowedUserIds.join(', ') || 'NONE (set ALLOWED_USER_IDS!)'}`);
   logger.info(`Pending dialogs in buffer: ${dialogTracker.pendingCount}`);
 }
