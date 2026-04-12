@@ -55,6 +55,101 @@ function stripMarkdown(text) {
     .trim();
 }
 
+// --- POST-VALIDATION (anti-hallucination) ---
+
+// Only these URLs may appear in bot responses
+const ALLOWED_URLS = [
+  'sabka.pro',
+  'sabka.pro/prompts',
+  'forms.gle/bqN1QuxkG28jo8M67',
+];
+
+// Phrases the system prompt explicitly forbids
+const FORBIDDEN_PHRASES = [
+  'уточню у команды',
+  'уточнил у команды',
+  'уточню у коллег',
+  'уточнил у коллег',
+  'вернусь с ответом',
+  'я передам информацию команде',
+  'передам команде и вернусь',
+  'временно недоступна',
+  'временно не работает',
+  'функция сейчас не работает',
+  'эта функция недоступна',
+  'сервис временно недоступен',
+  'мы работаем над восстановлением',
+];
+
+// Features SABKA does NOT have — if bot mentions these as existing, it's a hallucination
+const FAKE_FEATURES = [
+  'создать pptx',
+  'создание pptx',
+  'экспорт в pptx',
+  'скачать презентацию',
+  'ии-агент',
+  'ии-бот',
+  'ai-агент',
+  'запускать приложения',
+  'отправлять email',
+  'отправить email',
+  'управлять crm',
+  'интеграция с crm',
+  'создание ботов',
+  'построить бота',
+  'автоматизация процессов',
+  'projects folders',
+  'папки проектов',
+];
+
+/**
+ * Validate AI response before sending to user.
+ * Returns { text, issues } where issues is an array of detected problems.
+ * If critical issue found — text is replaced with escalation message.
+ */
+function validateResponse(text) {
+  const issues = [];
+  let cleaned = text;
+
+  // 1. Strip unauthorized URLs (keep only whitelisted)
+  const urlRegex = /https?:\/\/[^\s),]+/g;
+  cleaned = cleaned.replace(urlRegex, (url) => {
+    const isAllowed = ALLOWED_URLS.some(allowed => url.includes(allowed));
+    if (!isAllowed) {
+      issues.push({ type: 'blocked_url', detail: url });
+      return '';
+    }
+    return url;
+  });
+
+  // 2. Check for forbidden phrases (lies the bot must not tell)
+  const lower = cleaned.toLowerCase();
+  for (const phrase of FORBIDDEN_PHRASES) {
+    if (lower.includes(phrase)) {
+      issues.push({ type: 'forbidden_phrase', detail: phrase });
+    }
+  }
+
+  // 3. Check for hallucinated features (bot claims SABKA can do something it can't)
+  for (const fake of FAKE_FEATURES) {
+    if (lower.includes(fake)) {
+      issues.push({ type: 'fake_feature', detail: fake });
+    }
+  }
+
+  // If forbidden phrase or fake feature detected — replace entire response with escalation
+  const hasCritical = issues.some(i => i.type === 'forbidden_phrase' || i.type === 'fake_feature');
+  if (hasCritical) {
+    logger.warn('support-chat: validation BLOCKED response', { issues });
+    cleaned = 'Хороший вопрос — хочу дать Вам точный ответ. Передаю команде, они напишут. [ESCALATE]';
+  }
+
+  // Clean up double spaces left after URL removal
+  cleaned = cleaned.replace(/  +/g, ' ').trim();
+
+  return { text: cleaned, issues };
+}
+
 /**
  * Determine if message warrants Exa web search (:online suffix).
  * Adds $0.02 per request — only for diagnostic/technical queries.
@@ -192,14 +287,31 @@ async function _handle(ctx, msg, bot) {
   ]);
   logger.info('support-chat: step 2 OK', { userId, historyLen: allHistory.length });
 
-  // TWO-REPLY MODE: count only replies within current session (last 4 hours).
-  // If user comes back after 4h — treat as a new session, counter resets.
+  // THREE-REPLY MODE: count only replies within current session (last 4 hours).
+  // Reply 1-2: normal AI responses. Reply 3: forced escalation to human.
+  // After 3 replies: silent skip.
   const SESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
   const sessionCutoff = new Date(Date.now() - SESSION_WINDOW_MS);
   const sessionHistory = allHistory.filter(m => new Date(m.created_at) >= sessionCutoff);
   const repliesGiven = sessionHistory.filter(m => m.role === 'assistant').length;
-  if (repliesGiven >= 2) {
-    logger.info('support-chat: skipping (2 replies in current session)', { userId });
+
+  if (repliesGiven >= 3) {
+    logger.info('support-chat: skipping (3 replies in current session)', { userId });
+    return;
+  }
+
+  // 3rd reply — forced escalation to human team
+  if (repliesGiven === 2) {
+    logger.info('support-chat: 3rd reply — forced escalation', { userId });
+    const escalationMsg = 'Похоже, вопрос пока не решён. Передаю команде — живой человек разберётся и напишет Вам.';
+    const businessConnectionId = ctx.update?.business_message?.business_connection_id;
+    await ctx.telegram.sendMessage(msg.chat.id, escalationMsg, {
+      ...(businessConnectionId && { business_connection_id: businessConnectionId }),
+    });
+    await chatHistory.saveMessage(userId, 'assistant', escalationMsg);
+    const username = msg.from?.username || msg.chat?.username;
+    await notifyAdmins(bot, userId, username, userText);
+    logger.info('support-chat: forced escalation done', { userId });
     return;
   }
 
@@ -220,8 +332,15 @@ async function _handle(ctx, msg, bot) {
 
   // 5. Call OpenRouter
   logger.info('support-chat: step 5 — calling AI', { userId, model });
-  const response = await ai.chatCompletion(model, messages, { temperature: 0.4, maxTokens: 300 });
-  logger.info('support-chat: step 5 OK', { userId, responseLen: response.length });
+  const rawResponse = await ai.chatCompletion(model, messages, { temperature: 0.4, maxTokens: 300 });
+  logger.info('support-chat: step 5 OK', { userId, responseLen: rawResponse.length });
+
+  // 5.5. Post-validation — catch hallucinations, forbidden phrases, bad URLs
+  const validation = validateResponse(rawResponse);
+  if (validation.issues.length > 0) {
+    logger.info('support-chat: validation issues', { userId, issues: validation.issues });
+  }
+  const response = validation.text;
 
   // 6. Detect escalation: model tag OR user explicitly asked for human
   const hasModelTag = response.includes(ESCALATE_TAG);
