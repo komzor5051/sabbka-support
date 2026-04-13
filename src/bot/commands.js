@@ -251,6 +251,7 @@ function setupCommands(bot) {
             summaryProblem: analysis.summary_problem,
             summarySolution: analysis.summary_solution,
             embedding,
+            quality: 1.0,
           });
 
           added++;

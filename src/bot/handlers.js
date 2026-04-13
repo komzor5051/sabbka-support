@@ -227,6 +227,8 @@ function setupHandlers(bot) {
       if (userText) {
         saveAnswerToKB(userText, replyText).then((saved) => {
           if (saved) logger.info('escalation-reply: operator answer saved to KB', { userChatId });
+        }).catch((err) => {
+          logger.error('escalation-reply: saveAnswerToKB failed', { userChatId, error: err.message });
         });
       }
     } catch (err) {

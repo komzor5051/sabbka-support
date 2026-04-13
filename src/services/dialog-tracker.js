@@ -61,6 +61,9 @@ class DialogTracker {
         })
         .then(({ error }) => {
           if (error) logger.error('dialog-tracker: DB insert failed', { userId, error: error.message });
+        })
+        .catch((err) => {
+          logger.error('dialog-tracker: DB insert threw', { userId, error: err.message });
         });
     }
 
@@ -108,6 +111,9 @@ class DialogTracker {
         .eq('user_id', userId)
         .then(({ error }) => {
           if (error) logger.error('dialog-tracker: DB cleanup failed', { userId, error: error.message });
+        })
+        .catch((err) => {
+          logger.error('dialog-tracker: DB cleanup threw', { userId, error: err.message });
         });
     }
 

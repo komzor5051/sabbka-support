@@ -56,7 +56,7 @@ async function processCompletedDialog({ userId, firstMessageId, fullDialog, mess
 }
 
 function setupBusinessHandlers(bot, dialogTracker) {
-  bot.on('business_message', (ctx) => {
+  bot.on('business_message', async (ctx) => {
     const msg = ctx.businessMessage || ctx.update.business_message;
     if (!msg || !msg.text) return;
 
@@ -75,7 +75,7 @@ function setupBusinessHandlers(bot, dialogTracker) {
     // Use chat.id as dialog key (unique per conversation)
     const dialogKey = msg.chat.id;
 
-    dialogTracker.addMessage(dialogKey, {
+    await dialogTracker.addMessage(dialogKey, {
       text: msg.text,
       sender,
       messageId: msg.message_id,
