@@ -42,6 +42,77 @@ function rowsToObject(data) {
   return obj;
 }
 
+function rowsToArray(data) {
+  if (!data || !data.rows) return [];
+  const cols = data.cols.map(c => c.name);
+  return data.rows.map(row => {
+    const obj = {};
+    cols.forEach((name, i) => { obj[name] = row[i]; });
+    return obj;
+  });
+}
+
+/**
+ * Execute a native SQL query with template-tag parameters.
+ * Returns array of row objects. Used by admin tools.
+ *
+ * @param {string} sql — SQL with {{param}} placeholders
+ * @param {object} params — {name: value} for each template-tag
+ * @returns {Promise<{rows?: Array, error?: string}>}
+ */
+async function runQuery(sql, params = {}) {
+  if (!config.metabase.apiKey) return { error: 'not_configured' };
+
+  const templateTags = {};
+  const parameters = [];
+  for (const [name, value] of Object.entries(params)) {
+    templateTags[name] = { id: name, name, 'display-name': name, type: 'text' };
+    parameters.push({
+      type: 'category',
+      target: ['variable', ['template-tag', name]],
+      value: String(value),
+    });
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.metabase.timeoutMs);
+  const start = Date.now();
+
+  try {
+    const res = await fetch(`${config.metabase.apiUrl}/dataset`, {
+      method: 'POST',
+      headers: {
+        'x-api-key': config.metabase.apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        database: config.metabase.databaseId,
+        type: 'native',
+        native: { query: sql, 'template-tags': templateTags },
+        parameters,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      logger.error('metabase: runQuery non-200', { status: res.status, body: text.substring(0, 200) });
+      return { error: 'http_error', status: res.status };
+    }
+
+    const json = await res.json();
+    const rows = rowsToArray(json.data);
+    logger.info('metabase: runQuery done', { elapsed_ms: Date.now() - start, rowCount: rows.length });
+    return { rows };
+  } catch (err) {
+    if (err.name === 'AbortError') return { error: 'timeout' };
+    logger.error('metabase: runQuery failed', { error: err.message });
+    return { error: 'network', message: err.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function lookupUserByEmail(email) {
   if (!config.metabase.apiKey) {
     logger.warn('metabase: apiKey not set, tool disabled');
@@ -117,4 +188,4 @@ async function lookupUserByEmail(email) {
   }
 }
 
-module.exports = { lookupUserByEmail };
+module.exports = { lookupUserByEmail, runQuery };
