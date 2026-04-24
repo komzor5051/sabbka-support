@@ -7,6 +7,7 @@ const { authMiddleware } = require('./auth');
 const escalationStore = require('../services/escalation-store');
 const adminChat = require('../services/admin-chat');
 const adminHistory = require('../services/admin-history');
+const transport = require('../services/transport');
 
 // Persistent keyboard — one button only: start fresh chat (clear history).
 // Useful when switching between users so old context doesn't leak in.
@@ -141,29 +142,39 @@ function setupHandlers(bot) {
 
     const userChatId = escalation.userChatId;
     const userText = escalation.userText;
-    const bcId = escalationStore.getBusinessConnectionId();
+    const platform = escalation.platform || 'tg';
     const replyText = ctx.message.text;
 
-    if (!bcId) {
-      logger.error('escalation-reply: no businessConnectionId captured yet');
-      return ctx.reply('⚠️ business_connection_id ещё не получен. Дождись первого сообщения от пользователя.');
-    }
-
     try {
-      await ctx.telegram.sendMessage(userChatId, replyText, { business_connection_id: bcId });
-      await ctx.reply('✅ Доставлено');
-      logger.info('escalation-reply: forwarded', { userChatId, adminId: senderId });
+      if (platform === 'max') {
+        const ok = await transport.sendToMaxUser(userChatId, replyText);
+        if (!ok) {
+          await ctx.reply('❌ Не удалось доставить в MAX — проверь логи.');
+          return;
+        }
+        await ctx.reply('✅ Доставлено в MAX');
+        logger.info('escalation-reply: forwarded to MAX', { userChatId, adminId: senderId });
+      } else {
+        const bcId = escalationStore.getBusinessConnectionId();
+        if (!bcId) {
+          logger.error('escalation-reply: no businessConnectionId captured yet');
+          return ctx.reply('⚠️ business_connection_id ещё не получен. Дождись первого сообщения от пользователя.');
+        }
+        await ctx.telegram.sendMessage(userChatId, replyText, { business_connection_id: bcId });
+        await ctx.reply('✅ Доставлено');
+        logger.info('escalation-reply: forwarded to TG', { userChatId, adminId: senderId });
+      }
 
       if (userText) {
         saveOperatorReplyToKB(userText, replyText).then((saved) => {
-          if (saved) logger.info('escalation-reply: saved to KB', { userChatId });
+          if (saved) logger.info('escalation-reply: saved to KB', { userChatId, platform });
         }).catch((err) => {
           logger.error('escalation-reply: saveOperatorReplyToKB failed', { error: err.message });
         });
       }
     } catch (err) {
       await ctx.reply('❌ Ошибка доставки: ' + err.message);
-      logger.error('escalation-reply: failed', { userChatId, error: err.message });
+      logger.error('escalation-reply: failed', { userChatId, platform, error: err.message });
     }
   });
 

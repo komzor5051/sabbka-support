@@ -12,6 +12,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@maxhub/max-bot-api": "^0.2.2",
     "@supabase/supabase-js": "^2.96.0",
     "dotenv": "^17.3.1",
     "googleapis": "^171.4.0",

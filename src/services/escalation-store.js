@@ -6,11 +6,10 @@ const supabase = createClient(config.supabase.url, config.supabase.serviceKey);
 
 const TTL_MS = 48 * 60 * 60 * 1000; // 48 hours
 
-// In-memory cache — fast lookups, also serves as fallback if DB unavailable
+// In-memory cache — fast lookups + fallback when DB unavailable
 const cache = new Map();
 
-// Whether Supabase escalations table is available
-let dbAvailable = null; // null = not checked yet
+let dbAvailable = null;
 
 async function checkDbAvailable() {
   if (dbAvailable !== null) return dbAvailable;
@@ -21,7 +20,7 @@ async function checkDbAvailable() {
       .limit(1);
     dbAvailable = !error;
     if (!dbAvailable) {
-      logger.warn('escalation-store: table not found, using in-memory only. Run SQL from supabase-schema.sql to enable persistence.');
+      logger.warn('escalation-store: table not found, using in-memory only');
     } else {
       logger.info('escalation-store: Supabase persistence enabled');
     }
@@ -31,12 +30,19 @@ async function checkDbAvailable() {
   return dbAvailable;
 }
 
-async function storeEscalation(notificationMsgId, userChatId, userText) {
-  // Always store in cache (including original user question for KB learning)
-  cache.set(notificationMsgId, { userChatId, userText: userText || '', timestamp: Date.now() });
-  logger.info('escalation-store: stored', { notificationMsgId, userChatId });
+/**
+ * Store escalation entry.
+ * `platform` tells us which transport to use when admin replies.
+ */
+async function storeEscalation(notificationMsgId, userChatId, userText, platform = 'tg') {
+  cache.set(notificationMsgId, {
+    userChatId,
+    userText: userText || '',
+    platform,
+    timestamp: Date.now(),
+  });
+  logger.info('escalation-store: stored', { notificationMsgId, userChatId, platform });
 
-  // Persist to DB if available
   if (await checkDbAvailable()) {
     try {
       const { error } = await supabase
@@ -45,6 +51,7 @@ async function storeEscalation(notificationMsgId, userChatId, userText) {
           notification_msg_id: notificationMsgId,
           user_chat_id: userChatId,
           user_text: userText || '',
+          platform,
         });
       if (error) {
         logger.error('escalation-store: DB write failed', { error: error.message });
@@ -56,7 +63,6 @@ async function storeEscalation(notificationMsgId, userChatId, userText) {
 }
 
 async function getEscalation(notificationMsgId) {
-  // Check cache first
   const cached = cache.get(notificationMsgId);
   if (cached) {
     if (Date.now() - cached.timestamp > TTL_MS) {
@@ -66,20 +72,24 @@ async function getEscalation(notificationMsgId) {
     return cached;
   }
 
-  // Cache miss — check DB (covers restarts)
   if (await checkDbAvailable()) {
     try {
       const cutoff = new Date(Date.now() - TTL_MS).toISOString();
       const { data, error } = await supabase
         .from('escalations')
-        .select('user_chat_id, user_text, created_at')
+        .select('user_chat_id, user_text, platform, created_at')
         .eq('notification_msg_id', notificationMsgId)
         .gte('created_at', cutoff)
         .single();
 
       if (!error && data) {
-        const entry = { userChatId: data.user_chat_id, userText: data.user_text || '', timestamp: new Date(data.created_at).getTime() };
-        cache.set(notificationMsgId, entry); // Warm cache
+        const entry = {
+          userChatId: data.user_chat_id,
+          userText: data.user_text || '',
+          platform: data.platform || 'tg',
+          timestamp: new Date(data.created_at).getTime(),
+        };
+        cache.set(notificationMsgId, entry);
         return entry;
       }
     } catch (err) {
@@ -90,22 +100,19 @@ async function getEscalation(notificationMsgId) {
   return null;
 }
 
-// Singleton — captured from business_message, reused for operator replies
+// Telegram Business-specific — MAX doesn't need this.
 let businessConnectionId = null;
 
 function setBusinessConnectionId(bcId) {
-  if (bcId) {
-    businessConnectionId = bcId;
-  }
+  if (bcId) businessConnectionId = bcId;
 }
 
 function getBusinessConnectionId() {
   return businessConnectionId;
 }
 
-// Periodic cleanup — cache + DB
+// Periodic cleanup
 setInterval(async () => {
-  // Clean cache
   const now = Date.now();
   let cleanedCache = 0;
   for (const [msgId, entry] of cache) {
@@ -115,7 +122,6 @@ setInterval(async () => {
     }
   }
 
-  // Clean DB
   if (await checkDbAvailable()) {
     try {
       const cutoff = new Date(now - TTL_MS).toISOString();
@@ -134,7 +140,7 @@ setInterval(async () => {
   if (cleanedCache > 0) {
     logger.info('escalation-store: cache cleanup', { cleaned: cleanedCache, remaining: cache.size });
   }
-}, 60 * 60 * 1000).unref(); // Every hour
+}, 60 * 60 * 1000).unref();
 
 module.exports = {
   storeEscalation,
