@@ -182,11 +182,12 @@ function setupCommands(bot) {
       // === STEP A: import sessions from chat_history ===
       const rows = await db.getChatHistory();
 
-      // Group rows by user_id
+      // Group rows by (platform, user_id) — tg and max user IDs are independent name-spaces
       const byUser = {};
       for (const row of rows) {
-        if (!byUser[row.user_id]) byUser[row.user_id] = [];
-        byUser[row.user_id].push(row);
+        const key = `${row.platform || 'tg'}:${row.user_id}`;
+        if (!byUser[key]) byUser[key] = [];
+        byUser[key].push(row);
       }
 
       // Split each user's messages into sessions (gap > 4h = new session)

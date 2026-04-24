@@ -54,10 +54,6 @@ module.exports = {
     systemPromptPath: path.resolve(__dirname, '../docs/system-prompt.md'),
     knowledgeBasePath: path.resolve(__dirname, '../docs/knowledge-base.md'),
     historyLimit: 10,
-    onlineKeywords: [
-      'не работает', 'ошибка', 'error', 'баг', 'обновление',
-      'новая версия', 'вышло', 'упало', 'не отвечает', 'недоступно',
-    ],
     get systemPrompt() {
       return fs.readFileSync(this.systemPromptPath, 'utf-8');
     },
