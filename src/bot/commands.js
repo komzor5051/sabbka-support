@@ -48,25 +48,7 @@ async function recalculateRecords(records, categories, rules, ctx) {
 }
 
 function setupCommands(bot) {
-  // /start — no auth (public info)
-  bot.command('start', (ctx) => {
-    ctx.reply(
-      '👋 Привет! Я бот базы знаний поддержки Сабка.\n\n' +
-      'Что умею:\n' +
-      '• Напиши вопрос — найду похожие кейсы в базе\n' +
-      '• Отправь голосовое — транскрибирую и найду\n' +
-      '• Перешли сообщение юзера — подберу ответ\n\n' +
-      'Команды:\n' +
-      '/stats — статистика базы\n' +
-      '/models — список моделей Сабка\n' +
-      '/export [N] — выгрузить CSV\n' +
-      '/add_category [имя] [описание]\n' +
-      '/skip — пропустить сохранение, новый вопрос\n' +
-      '/change [правило] — изменить категоризацию\n' +
-      '/recalculate [категория] — пересчитать\n' +
-      '/rebuild_kb — пересобрать KB из chat_history + переклассифицировать все записи'
-    );
-  });
+  // NOTE: /start and /help are registered in handlers.js (admin-only, with MAIN_MENU keyboard)
 
   bot.command('stats', authMiddleware, async (ctx) => {
     try {
