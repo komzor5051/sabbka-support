@@ -62,4 +62,13 @@ module.exports = {
       return fs.readFileSync(this.knowledgeBasePath, 'utf-8');
     },
   },
+  adminChat: {
+    systemPromptPath: path.resolve(__dirname, '../docs/admin-system-prompt.md'),
+    historyLimit: 20,
+    maxToolSteps: 5,
+    toolResultCharCap: 10000,
+    get systemPrompt() {
+      return fs.readFileSync(this.systemPromptPath, 'utf-8');
+    },
+  },
 };

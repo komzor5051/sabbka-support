@@ -3,53 +3,58 @@ const logger = require('../utils/logger');
 const config = require('../config');
 const ai = require('../services/ai');
 const db = require('../services/database');
-const { formatSearchResults } = require('../utils/formatters');
 const { authMiddleware } = require('./auth');
 const escalationStore = require('../services/escalation-store');
+const adminChat = require('../services/admin-chat');
+const adminHistory = require('../services/admin-history');
 
-// Pending context: stores query, generated answer, and mode
-// mode: 'buttons' — waiting for inline button click
-// mode: 'edit'    — waiting for text message (Artem's own answer)
-// Map<userId, { query, answer, results, timestamp, mode }>
-const pendingContext = new Map();
-const PENDING_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
+// ─────────────────────────────────────────────────────────────
+// Reply keyboard — main menu shortcuts (always visible)
+// ─────────────────────────────────────────────────────────────
 
-function setPendingContext(userId, data) {
-  pendingContext.set(userId, { ...data, timestamp: Date.now() });
-}
+const MAIN_MENU = Markup.keyboard([
+  ['📊 Метрики', '⚠️ Эскалации'],
+  ['🔍 Найти юзера', '📚 Поиск в KB'],
+  ['🧹 Очистить чат', '❓ Помощь'],
+]).resize().persistent();
 
-function getPendingContext(userId) {
-  const ctx = pendingContext.get(userId);
-  if (!ctx) return null;
-  if (Date.now() - ctx.timestamp > PENDING_TIMEOUT_MS) {
-    pendingContext.delete(userId);
-    return null;
-  }
-  return ctx;
-}
+// Button labels that route to AI with a predefined prompt
+const MENU_PROMPTS = {
+  '📊 Метрики': 'покажи метрики за сегодня',
+  '⚠️ Эскалации': 'покажи эскалации за последние 24 часа',
+  '🔍 Найти юзера': 'давай найдём юзера. Напиши какой email?',
+  '📚 Поиск в KB': 'что искать в базе знаний? Напиши запрос.',
+};
 
-const inlineKeyboard = Markup.inlineKeyboard([
-  Markup.button.callback('✅ Отправить', 'send_answer'),
-  Markup.button.callback('✏️ Редактировать', 'edit_answer'),
-  Markup.button.callback('🔄 Другой вариант', 'regenerate_answer'),
-]);
+const HELP_TEXT = `Я — AI-ассистент оператора SABKA. Инструменты:
 
-/**
- * Save Artem's answer as a new KB entry
- */
-async function saveAnswerToKB(originalQuery, answer) {
+👤 lookup — данные аккаунта по email (тариф, токены, подписка)
+💳 payments — список платежей с суммами и статусами
+⚠️ diagnostics — проверка ошибок биллинга/подписки
+📚 search_kb — поиск по базе прошлых диалогов
+🆘 escalations — последние эскалации к человеку
+💬 dialogs — история переписки юзера с ботом
+📊 metrics — метрики за сегодня
+
+Можно писать свободным текстом — сам разберусь какой инструмент позвать. Пиши как коллеге.
+
+Чтобы ответить юзеру из эскалации — сделай reply на сообщение от бота с 🆘. Ответ уйдёт юзеру, а пара вопрос+ответ сохранится в KB.
+
+/clear — очистить историю нашего чата (справа меню 🧹 то же самое)`;
+
+// ─────────────────────────────────────────────────────────────
+// Self-learning: save operator's reply as high-quality KB entry
+// ─────────────────────────────────────────────────────────────
+
+async function saveOperatorReplyToKB(userQuestion, operatorAnswer) {
   try {
     const categories = await db.getCategories();
     const rules = await db.getRules();
-
-    // Build a synthetic dialog for analysis
-    const syntheticDialog = `[USER]: ${originalQuery}\n[SUPPORT]: ${answer}`;
+    const syntheticDialog = `[USER]: ${userQuestion}\n[SUPPORT]: ${operatorAnswer}`;
     const analysis = await ai.analyzeDialog(syntheticDialog, categories, rules);
 
     const validCats = categories.map(c => c.name);
-    if (!validCats.includes(analysis.category)) {
-      analysis.category = 'прочее';
-    }
+    if (!validCats.includes(analysis.category)) analysis.category = 'прочее';
 
     const embeddingText = `${analysis.summary_problem} ${analysis.summary_solution}`;
     const embedding = await ai.generateEmbedding(embeddingText);
@@ -62,151 +67,96 @@ async function saveAnswerToKB(originalQuery, answer) {
       summaryProblem: analysis.summary_problem,
       summarySolution: analysis.summary_solution,
       embedding,
-      quality: 1.5, // Operator-verified answer — highest quality
+      quality: 1.5, // operator-verified — highest quality
     });
-
-    logger.info('Answer saved to KB', { category: analysis.category, quality: 1.5 });
+    logger.info('KB: operator answer saved', { category: analysis.category });
     return true;
   } catch (err) {
-    logger.error('Failed to save answer to KB', { error: err.message });
+    logger.error('KB: saveOperatorReplyToKB failed', { error: err.message });
     return false;
   }
 }
 
-async function handleTextQuery(ctx) {
-  const query = ctx.message.text;
-  if (!query || query.startsWith('/')) return;
+// ─────────────────────────────────────────────────────────────
+// Handler: admin text → AI assistant
+// ─────────────────────────────────────────────────────────────
 
-  const userId = ctx.from.id;
+async function handleAdminText(ctx) {
+  const text = ctx.message?.text;
+  if (!text || text.startsWith('/')) return;
+  const adminId = ctx.from.id;
 
-  // Check if this is a text answer (edit mode)
-  const pending = getPendingContext(userId);
-  if (pending && pending.mode === 'edit') {
-    pendingContext.delete(userId);
-
-    await ctx.reply('💾 Сохраняю ответ в базу знаний...');
-    const saved = await saveAnswerToKB(pending.query, query);
-
-    if (saved) {
-      await ctx.reply('✅ Ответ сохранён в базу! Теперь я буду использовать его для похожих вопросов.');
-    } else {
-      await ctx.reply('❌ Не удалось сохранить ответ.');
-    }
+  // Menu button: clear — handled directly, no AI
+  if (text === '🧹 Очистить чат') {
+    const ok = await adminHistory.clearHistory(adminId);
+    await ctx.reply(ok ? '🧹 История очищена.' : '⚠️ Не удалось очистить.', MAIN_MENU);
     return;
   }
 
-  // New query — clear any old pending context
-  pendingContext.delete(userId);
+  // Menu button: help — handled directly
+  if (text === '❓ Помощь') {
+    await ctx.reply(HELP_TEXT, MAIN_MENU);
+    return;
+  }
 
-  await ctx.reply('🔍 Ищу в базе знаний...');
+  // Menu buttons with predefined prompt → rewrite text and send to AI
+  const effectiveText = MENU_PROMPTS[text] || text;
+
+  await ctx.sendChatAction('typing').catch(() => {});
 
   try {
-    const queryEmbedding = await ai.generateEmbedding(query);
-    const results = await db.searchSimilar(queryEmbedding, 5);
-    const answer = await ai.generateAnswer(query, results);
-    const text = formatSearchResults(results, answer);
-
-    await ctx.reply(text);
-
-    if (answer) {
-      // Store context and show inline buttons
-      setPendingContext(userId, { query, answer, results, mode: 'buttons' });
-      await ctx.reply('Что сделать с ответом?', inlineKeyboard);
-    } else {
-      // No answer generated — go straight to edit mode
-      setPendingContext(userId, { query, answer: null, results, mode: 'edit' });
-      await ctx.reply('💡 В базе нет подходящих кейсов. Напиши свой ответ — я сохраню его.\nИли /skip для нового вопроса.');
-    }
+    await adminChat.handle(adminId, effectiveText, async (replyText) => {
+      await ctx.reply(replyText || '⚠️ Пустой ответ.', MAIN_MENU);
+    });
   } catch (err) {
-    logger.error('Query handling failed', { error: err.message });
-    await ctx.reply('❌ Ошибка при поиске. Попробуй ещё раз.');
+    logger.error('admin-chat: handler threw', { adminId, error: err.message, stack: err.stack });
+    await ctx.reply(`⚠️ Ошибка: ${err.message}`, MAIN_MENU);
   }
 }
 
-async function handleVoice(ctx) {
-  await ctx.reply('🎤 Транскрибирую голосовое...');
+// ─────────────────────────────────────────────────────────────
+// Handler: admin voice → transcribe → AI
+// ─────────────────────────────────────────────────────────────
+
+async function handleAdminVoice(ctx) {
+  const adminId = ctx.from.id;
+  await ctx.reply('🎤 Распознаю голосовое...');
 
   try {
     const fileId = ctx.message.voice?.file_id || ctx.message.audio?.file_id;
-    if (!fileId) {
-      return ctx.reply('❌ Не удалось получить аудио.');
-    }
+    if (!fileId) return ctx.reply('⚠️ Не удалось получить аудио.');
 
     const fileLink = await ctx.telegram.getFileLink(fileId);
     const response = await fetch(fileLink.href);
     const buffer = Buffer.from(await response.arrayBuffer());
-
     const transcription = await ai.transcribeVoice(buffer);
-    await ctx.reply(`📝 Распознано: "${transcription}"\n\n🔍 Ищу в базе...`);
 
-    const queryEmbedding = await ai.generateEmbedding(transcription);
-    const results = await db.searchSimilar(queryEmbedding, 5);
-    const answer = await ai.generateAnswer(transcription, results);
-    const text = formatSearchResults(results, answer);
+    await ctx.reply(`📝 «${transcription}»`);
+    await ctx.sendChatAction('typing').catch(() => {});
 
-    await ctx.reply(text);
-
-    if (answer) {
-      setPendingContext(ctx.from.id, { query: transcription, answer, results, mode: 'buttons' });
-      await ctx.reply('Что сделать с ответом?', inlineKeyboard);
-    } else {
-      setPendingContext(ctx.from.id, { query: transcription, answer: null, results, mode: 'edit' });
-      await ctx.reply('💡 Напиши свой ответ — я сохраню его.\nИли /skip для нового вопроса.');
-    }
+    await adminChat.handle(adminId, transcription, async (replyText) => {
+      await ctx.reply(replyText || '⚠️ Пустой ответ.', MAIN_MENU);
+    });
   } catch (err) {
-    logger.error('Voice handling failed', { error: err.message });
-    await ctx.reply('❌ Ошибка при обработке голосового.');
+    logger.error('admin-voice: failed', { adminId, error: err.message });
+    await ctx.reply(`⚠️ Ошибка: ${err.message}`, MAIN_MENU);
   }
 }
 
-async function handleForward(ctx) {
-  const text = ctx.message.text || ctx.message.caption || '';
-  if (!text) {
-    return ctx.reply('❌ В пересланном сообщении нет текста.');
-  }
-
-  // Forward always starts a new query (clears pending)
-  pendingContext.delete(ctx.from.id);
-
-  await ctx.reply('🔍 Анализирую пересланное сообщение...');
-
-  try {
-    const queryEmbedding = await ai.generateEmbedding(text);
-    const results = await db.searchSimilar(queryEmbedding, 5);
-    const answer = await ai.generateAnswer(text, results);
-    const response = formatSearchResults(results, answer);
-
-    await ctx.reply(response);
-
-    if (answer) {
-      setPendingContext(ctx.from.id, { query: text, answer, results, mode: 'buttons' });
-      await ctx.reply('Что сделать с ответом?', inlineKeyboard);
-    } else {
-      setPendingContext(ctx.from.id, { query: text, answer: null, results, mode: 'edit' });
-      await ctx.reply('💡 Напиши свой ответ — я сохраню его.\nИли /skip для нового вопроса.');
-    }
-  } catch (err) {
-    logger.error('Forward handling failed', { error: err.message });
-    await ctx.reply('❌ Ошибка при обработке.');
-  }
-}
+// ─────────────────────────────────────────────────────────────
+// Main setup — order matters
+// ─────────────────────────────────────────────────────────────
 
 function setupHandlers(bot) {
-  // Operator reply forwarding — BEFORE auth-protected handlers
-  // When an admin replies to an escalation notification, forward their text to the user
+  // 1. Operator reply forwarding — BEFORE auth-protected handlers
+  // When admin replies to an escalation notification, forward their text to the user
   bot.on('text', async (ctx, next) => {
     const senderId = ctx.from?.id;
     const replyTo = ctx.message?.reply_to_message;
-
-    // Only process if: sender is an escalation admin AND they're replying to a message
-    if (!replyTo || !config.escalationUserIds.includes(senderId)) {
-      return next();
-    }
+    if (!replyTo || !config.escalationUserIds.includes(senderId)) return next();
 
     const escalation = await escalationStore.getEscalation(replyTo.message_id);
-    if (!escalation) {
-      return next(); // Not a reply to an escalation notification
-    }
+    if (!escalation) return next();
 
     const userChatId = escalation.userChatId;
     const userText = escalation.userText;
@@ -215,114 +165,52 @@ function setupHandlers(bot) {
 
     if (!bcId) {
       logger.error('escalation-reply: no businessConnectionId captured yet');
-      return ctx.reply('Ошибка: business_connection_id ещё не получен. Подождите пока придёт хотя бы одно сообщение от пользователя.');
+      return ctx.reply('⚠️ business_connection_id ещё не получен. Дождись первого сообщения от пользователя.');
     }
 
     try {
       await ctx.telegram.sendMessage(userChatId, replyText, { business_connection_id: bcId });
-      await ctx.reply('Ответ доставлен');
-      logger.info('escalation-reply: forwarded to user', { userChatId, adminId: senderId });
+      await ctx.reply('✅ Доставлено');
+      logger.info('escalation-reply: forwarded', { userChatId, adminId: senderId });
 
-      // Self-learning: save operator's answer to KB for future RAG retrieval
       if (userText) {
-        saveAnswerToKB(userText, replyText).then((saved) => {
-          if (saved) logger.info('escalation-reply: operator answer saved to KB', { userChatId });
+        saveOperatorReplyToKB(userText, replyText).then((saved) => {
+          if (saved) logger.info('escalation-reply: saved to KB', { userChatId });
         }).catch((err) => {
-          logger.error('escalation-reply: saveAnswerToKB failed', { userChatId, error: err.message });
+          logger.error('escalation-reply: saveOperatorReplyToKB failed', { error: err.message });
         });
       }
     } catch (err) {
-      await ctx.reply('Ошибка доставки: ' + err.message);
+      await ctx.reply('❌ Ошибка доставки: ' + err.message);
       logger.error('escalation-reply: failed', { userChatId, error: err.message });
     }
   });
 
-  // /skip — clear pending context, next message is a new query
-  bot.command('skip', authMiddleware, async (ctx) => {
-    pendingContext.delete(ctx.from.id);
-    await ctx.reply('⏭ Пропущено. Задавай новый вопрос.');
+  // 2. Commands (admin-only) — must come BEFORE generic text handler
+  bot.command('start', authMiddleware, async (ctx) => {
+    await ctx.reply(
+      `Привет! Я AI-ассистент оператора SABKA — диспетчерская для тебя.\n\n` + HELP_TEXT,
+      MAIN_MENU
+    );
   });
 
-  // Inline button: Send — save AI answer to KB as-is
-  bot.action('send_answer', async (ctx) => {
-    await ctx.answerCbQuery();
-    const userId = ctx.from.id;
-    if (!config.allowedUserIds.includes(userId)) return;
-    const pending = getPendingContext(userId);
-
-    if (!pending || !pending.answer) {
-      return ctx.editMessageText('⚠️ Контекст истёк. Задай вопрос заново.');
-    }
-
-    pendingContext.delete(userId);
-    await ctx.editMessageText('💾 Сохраняю ответ в базу знаний...');
-    const saved = await saveAnswerToKB(pending.query, pending.answer);
-
-    if (saved) {
-      await ctx.editMessageText('✅ Ответ сохранён в базу!');
-    } else {
-      await ctx.editMessageText('❌ Не удалось сохранить ответ.');
-    }
+  bot.command('help', authMiddleware, async (ctx) => {
+    await ctx.reply(HELP_TEXT, MAIN_MENU);
   });
 
-  // Inline button: Edit — switch to text input mode
-  bot.action('edit_answer', async (ctx) => {
-    await ctx.answerCbQuery();
-    const userId = ctx.from.id;
-    if (!config.allowedUserIds.includes(userId)) return;
-    const pending = getPendingContext(userId);
-
-    if (!pending) {
-      return ctx.editMessageText('⚠️ Контекст истёк. Задай вопрос заново.');
-    }
-
-    // Switch to edit mode — next text message will be saved as answer
-    setPendingContext(userId, { ...pending, mode: 'edit' });
-    await ctx.editMessageText('✏️ Напиши свой вариант ответа — я сохраню его в базу.');
+  bot.command('clear', authMiddleware, async (ctx) => {
+    const ok = await adminHistory.clearHistory(ctx.from.id);
+    await ctx.reply(ok ? '🧹 История очищена.' : '⚠️ Не удалось очистить.', MAIN_MENU);
   });
 
-  // Inline button: Regenerate — re-run AI answer with higher temperature
-  bot.action('regenerate_answer', async (ctx) => {
-    await ctx.answerCbQuery('🔄 Генерирую новый вариант...');
-    const userId = ctx.from.id;
-    if (!config.allowedUserIds.includes(userId)) return;
-    const pending = getPendingContext(userId);
+  // 3. Voice/audio from admin → transcribe → AI
+  bot.on('voice', authMiddleware, handleAdminVoice);
+  bot.on('audio', authMiddleware, handleAdminVoice);
 
-    if (!pending) {
-      return ctx.editMessageText('⚠️ Контекст истёк. Задай вопрос заново.');
-    }
+  // 4. Text messages (non-command) → admin AI chat
+  bot.on('text', authMiddleware, handleAdminText);
 
-    try {
-      const newAnswer = await ai.generateAnswer(pending.query, pending.results, { temperature: 0.8 });
-      if (!newAnswer) {
-        return ctx.editMessageText('⚠️ Не удалось сгенерировать новый вариант.');
-      }
-
-      // Update stored answer
-      setPendingContext(userId, { ...pending, answer: newAnswer, mode: 'buttons' });
-      await ctx.editMessageText(`🔄 Новый вариант:\n\n"${newAnswer}"`, inlineKeyboard);
-    } catch (err) {
-      logger.error('Regenerate failed', { error: err.message });
-      await ctx.editMessageText('❌ Ошибка при генерации. Попробуй ещё раз.', inlineKeyboard);
-    }
-  });
-
-  // Auth on each handler individually — NOT bot.use() which would block business_messages
-  bot.on('voice', authMiddleware, handleVoice);
-  bot.on('audio', authMiddleware, handleVoice);
-
-  // Forwarded messages
-  bot.on('message', authMiddleware, (ctx, next) => {
-    if (ctx.message.forward_origin || ctx.message.forward_from || ctx.message.forward_date) {
-      return handleForward(ctx);
-    }
-    return next();
-  });
-
-  // Text messages (non-command)
-  bot.on('text', authMiddleware, handleTextQuery);
-
-  logger.info('Private chat handlers registered');
+  logger.info('Admin handlers registered');
 }
 
 module.exports = { setupHandlers };
