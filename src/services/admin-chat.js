@@ -3,6 +3,7 @@ const logger = require('../utils/logger');
 const ai = require('./ai');
 const adminHistory = require('./admin-history');
 const adminTools = require('./admin-tools');
+const kbRetriever = require('./kb-retriever');
 
 /**
  * Strip markdown from model output — Telegram plain text.
@@ -41,7 +42,7 @@ async function handle(adminId, userText, sendReply) {
     return;
   }
 
-  // 2. Load history (includes just-saved user message) + build messages
+  // 2. Load history + retrieve relevant KB (so Grok can answer general SABKA questions)
   let systemPrompt;
   try {
     systemPrompt = config.adminChat.systemPrompt;
@@ -50,9 +51,28 @@ async function handle(adminId, userText, sendReply) {
     systemPrompt = 'Ты — AI-ассистент оператора поддержки SABKA.';
   }
 
-  const history = await adminHistory.getHistory(adminId, config.adminChat.historyLimit);
+  const [history, retrieved] = await Promise.all([
+    adminHistory.getHistory(adminId, config.adminChat.historyLimit),
+    kbRetriever.retrieveContext(userText, {
+      minTextLen: 10,
+      kbMatchCount: 3,
+      kbThreshold: 0.40,
+      casesMatchCount: 3,
+      casesThreshold: 0.60,
+    }),
+  ]);
+
+  // Inject KB sections + past cases into system prompt
+  let enrichedSystem = systemPrompt;
+  if (retrieved.kbSectionsText) {
+    enrichedSystem += '\n\n---\nРЕЛЕВАНТНЫЕ РАЗДЕЛЫ БАЗЫ ЗНАНИЙ SABKA:\n\n' + retrieved.kbSectionsText;
+  }
+  if (retrieved.pastCasesText) {
+    enrichedSystem += '\n\n---' + retrieved.pastCasesText;
+  }
+
   const messages = [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: enrichedSystem },
     ...history.map(({ role, content }) => ({ role, content })),
   ];
 

@@ -5,6 +5,7 @@ const db = require('./database');
 const chatHistory = require('./chat-history');
 const escalationStore = require('./escalation-store');
 const metabase = require('./metabase');
+const kbRetriever = require('./kb-retriever');
 
 const ESCALATE_TAG = '[ESCALATE]';
 
@@ -195,49 +196,8 @@ function validateResponse(text) {
   return { text: cleaned, issues };
 }
 
-/**
- * Retrieve relevant KB sections + similar past cases in one embedding call.
- * Returns { kbSectionsText, pastCasesText }.
- */
-async function retrieveContext(userText) {
-  const empty = { kbSectionsText: '', pastCasesText: '' };
-
-  // Skip retrieval for very short messages (greetings, "ок", etc.)
-  if (!userText || userText.trim().length < 15) return empty;
-
-  try {
-    // One embedding, two parallel searches
-    const embedding = await ai.generateEmbedding(userText);
-    const [sections, cases] = await Promise.all([
-      db.searchKbSections(embedding, 2, 0.50),
-      db.searchSimilar(embedding, 3, null, 0.70),
-    ]);
-
-    // Format KB sections
-    let kbSectionsText = '';
-    if (sections && sections.length > 0) {
-      kbSectionsText = sections.map(s => s.content).join('\n\n---\n\n');
-      logger.info('support-chat: KB sections retrieved', { count: sections.length, ids: sections.map(s => s.id) });
-    }
-
-    // Format past cases
-    let pastCasesText = '';
-    if (cases && cases.length > 0) {
-      const MAX_CHARS = 400;
-      const trim = (s) => s && s.length > MAX_CHARS ? s.substring(0, MAX_CHARS) + '…' : s;
-      const block = cases.map((c, i) => {
-        const sim = Math.round(c.similarity * 100);
-        return `Кейс ${i + 1} (${sim}%):\nПроблема: ${trim(c.summary_problem)}\nРешение: ${trim(c.summary_solution)}`;
-      }).join('\n\n');
-      pastCasesText = `\n\nПОХОЖИЕ ПРОШЛЫЕ КЕЙСЫ (референс, НЕ цитируй дословно):\n${block}`;
-    }
-
-    return { kbSectionsText, pastCasesText };
-  } catch (err) {
-    logger.error('support-chat: retrieval failed', { error: err.message });
-    return empty;
-  }
-}
+// KB retrieval moved to kb-retriever.js — reused by admin-chat.js
+const retrieveContext = kbRetriever.retrieveContext;
 
 /**
  * Build the messages array for OpenRouter:
