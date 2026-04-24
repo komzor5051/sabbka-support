@@ -4,8 +4,53 @@ const ai = require('./ai');
 const db = require('./database');
 const chatHistory = require('./chat-history');
 const escalationStore = require('./escalation-store');
+const metabase = require('./metabase');
 
 const ESCALATE_TAG = '[ESCALATE]';
+
+// Max assistant replies per 4h session.
+// Reply 1-3: normal AI (may include 1 tool call for account lookup).
+// Reply 4: forced escalation to human.
+// Reply >= 5: silent skip.
+const MAX_REPLIES = 5;
+const FORCED_ESCALATION_AT = 4;
+
+const EMAIL_REGEX = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g;
+
+// Tool definition for Grok — only enabled when METABASE_API_KEY is set
+const TOOL_LOOKUP_ACCOUNT = {
+  type: 'function',
+  function: {
+    name: 'lookup_user_account',
+    description: 'Получить данные аккаунта пользователя САБКА по email: тариф, статус подписки, остаток токенов/чанков, дата окончания подписки, активность за 30 дней (запросы, картинки). Используй только когда пользователь спрашивает про СВОЙ аккаунт: кончились токены, сколько осталось, почему списалось, когда кончается подписка. На общие вопросы этот инструмент не нужен.',
+    parameters: {
+      type: 'object',
+      properties: {
+        email: {
+          type: 'string',
+          description: 'Email пользователя. Если пользователь не указал email в диалоге — инструмент всё равно вызови, но с пустой строкой, и код попросит email у пользователя.',
+        },
+      },
+      required: ['email'],
+    },
+  },
+};
+
+function findLatestEmailInMessages(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const text = (messages[i].content || '').toString();
+    const matches = text.match(EMAIL_REGEX);
+    if (matches && matches.length > 0) return matches[matches.length - 1];
+  }
+  return null;
+}
+
+function hashEmailForLog(email) {
+  if (!email) return null;
+  const [local, domain] = email.split('@');
+  if (!domain) return 'invalid';
+  return `${local.substring(0, 2)}***@${domain}`;
+}
 
 // Per-user processing queue — ensures messages from the same user are handled
 // sequentially, so history is consistent even when messages arrive in rapid succession.
@@ -151,15 +196,6 @@ function validateResponse(text) {
 }
 
 /**
- * Determine if message warrants Exa web search (:online suffix).
- * Adds $0.02 per request — only for diagnostic/technical queries.
- */
-function needsOnline(text) {
-  const lower = text.toLowerCase();
-  return config.supportChat.onlineKeywords.some(k => lower.includes(k));
-}
-
-/**
  * Retrieve relevant KB sections + similar past cases in one embedding call.
  * Returns { kbSectionsText, pastCasesText }.
  */
@@ -300,18 +336,19 @@ async function _handle(ctx, msg, bot) {
   ]);
   logger.info('support-chat: step 2 OK', { userId, historyLen: allHistory.length, repliesGiven });
 
-  // THREE-REPLY MODE: exact count from DB (not limited by historyLimit).
-  // Reply 1-2: normal AI responses. Reply 3: forced escalation to human.
-  // After 3 replies: silent skip.
+  // FIVE-REPLY MODE: exact count from DB (not limited by historyLimit).
+  // Reply 1-3: normal AI responses (may include 1 tool call for account lookup).
+  // Reply 4: forced escalation to human.
+  // After MAX_REPLIES replies: silent skip.
 
-  if (repliesGiven >= 3) {
-    logger.info('support-chat: skipping (3 replies in current session)', { userId });
+  if (repliesGiven >= MAX_REPLIES) {
+    logger.info('support-chat: skipping (max replies in current session)', { userId, repliesGiven });
     return;
   }
 
-  // 3rd reply — forced escalation to human team
-  if (repliesGiven === 2) {
-    logger.info('support-chat: 3rd reply — forced escalation', { userId });
+  // Forced escalation — human team takes over
+  if (repliesGiven === FORCED_ESCALATION_AT - 1) {
+    logger.info('support-chat: forced escalation', { userId, repliesGiven });
     const escalationMsg = 'Похоже, вопрос пока не решён. Передаю команде — живой человек разберётся и напишет Вам.';
     const businessConnectionId = ctx.update?.business_message?.business_connection_id;
     await ctx.telegram.sendMessage(msg.chat.id, escalationMsg, {
@@ -332,19 +369,86 @@ async function _handle(ctx, msg, bot) {
   const messages = buildMessages(userText, history, retrievedContext);
   logger.info('support-chat: step 3 — messages built', { userId, msgCount: messages.length });
 
-  // 4. Select model — add :online for diagnostic queries
-  const model = needsOnline(userText)
-    ? config.openrouter.models.gemini + ':online'
-    : config.openrouter.models.gemini;
+  // 4. Select model (Grok 4.1 Fast for tool calling + agentic support)
+  const model = config.openrouter.models.chat;
 
-  if (model.endsWith(':online')) {
-    logger.info('support-chat: using :online (Exa search)', { userId });
+  // 5. Call OpenRouter — with tools if Metabase configured
+  const toolsEnabled = !!config.metabase.apiKey;
+  const tools = toolsEnabled ? [TOOL_LOOKUP_ACCOUNT] : undefined;
+
+  logger.info('support-chat: step 5 — calling AI', { userId, model, toolsEnabled });
+  let aiResponse = await ai.chatCompletion(model, messages, {
+    temperature: 0.4,
+    maxTokens: 300,
+    tools,
+  });
+
+  // 5a. Tool call handling — one-shot (no recursion)
+  // If model wants to lookup account data → fetch via Metabase → call again WITHOUT tools
+  if (toolsEnabled && aiResponse.tool_calls && aiResponse.tool_calls.length > 0) {
+    const toolCall = aiResponse.tool_calls[0];
+    const fnName = toolCall.function?.name;
+
+    if (fnName === 'lookup_user_account') {
+      // SECURITY: ignore email from model's tool_call.arguments.
+      // Extract email ONLY from user's messages in current session (userText is already in sessionMessages).
+      const userMessages = sessionMessages.filter(m => m.role === 'user');
+      const email = findLatestEmailInMessages(userMessages);
+
+      let toolResult;
+      if (!email) {
+        toolResult = {
+          error: 'no_email_in_dialog',
+          hint: 'Попросите пользователя указать email от аккаунта САБКА. Только после этого можно проверить данные.',
+        };
+        logger.info('support-chat: tool_call — no email in dialog', { userId });
+      } else {
+        logger.info('support-chat: tool_call — lookup', { userId, emailHash: hashEmailForLog(email) });
+        const result = await metabase.lookupUserByEmail(email);
+        if (result.error) {
+          toolResult = {
+            error: result.error,
+            hint: 'Не удалось получить данные сейчас. Скажи пользователю что проверишь позже и эскалируй [ESCALATE].',
+          };
+        } else if (!result.found) {
+          toolResult = {
+            found: false,
+            hint: 'Аккаунт с таким email не найден. Попроси пользователя проверить правильность email.',
+          };
+        } else {
+          toolResult = {
+            found: true,
+            account: result.user,
+            hint: 'Сформулируй ответ на русском. НИКОГДА не называй цены, стоимость, рубли, доллары. Говори только: тариф, токены (чанки), картинки, запросы, дата окончания, остаток.',
+          };
+        }
+      }
+
+      // Append assistant's tool_call turn + tool result, then call again WITHOUT tools
+      messages.push({
+        role: 'assistant',
+        content: aiResponse.content || '',
+        tool_calls: aiResponse.tool_calls,
+      });
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        content: JSON.stringify(toolResult),
+      });
+
+      logger.info('support-chat: step 5b — second AI call (no tools)', { userId });
+      aiResponse = await ai.chatCompletion(model, messages, {
+        temperature: 0.4,
+        maxTokens: 300,
+      });
+      logger.info('support-chat: step 5b OK', { userId, contentLen: (aiResponse.content || '').length });
+    } else {
+      logger.warn('support-chat: unknown tool_call requested', { userId, fnName });
+    }
   }
 
-  // 5. Call OpenRouter
-  logger.info('support-chat: step 5 — calling AI', { userId, model });
-  const rawResponse = await ai.chatCompletion(model, messages, { temperature: 0.4, maxTokens: 300 });
-  logger.info('support-chat: step 5 OK', { userId, responseLen: rawResponse.length });
+  const rawResponse = aiResponse.content || '';
+  logger.info('support-chat: step 5 final', { userId, responseLen: rawResponse.length });
 
   // 5.5. Post-validation — catch hallucinations, forbidden phrases, bad URLs
   const validation = validateResponse(rawResponse);

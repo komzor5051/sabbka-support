@@ -10,13 +10,20 @@ module.exports = {
     apiKey: process.env.OPENROUTER_API_KEY,
     baseUrl: 'https://openrouter.ai/api/v1',
     models: {
-      gemini: 'google/gemini-2.5-flash-lite',
+      chat: 'x-ai/grok-4.1-fast',
+      analyzer: 'google/gemini-2.5-flash-lite',
       embedding: 'openai/text-embedding-3-small',
     },
   },
   supabase: {
     url: process.env.SUPABASE_URL,
     serviceKey: process.env.SUPABASE_SERVICE_KEY,
+  },
+  metabase: {
+    apiUrl: process.env.METABASE_API_URL || 'https://metabase.sabka.pro/api',
+    apiKey: process.env.METABASE_API_KEY,
+    databaseId: 2,
+    timeoutMs: 15000,
   },
   sheets: {
     credentials: process.env.GOOGLE_SHEETS_CREDENTIALS,
