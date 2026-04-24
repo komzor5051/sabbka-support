@@ -238,9 +238,9 @@ function setupHandlers(bot) {
   });
 
   // /skip — clear pending context, next message is a new query
-  bot.command('skip', authMiddleware, (ctx) => {
+  bot.command('skip', authMiddleware, async (ctx) => {
     pendingContext.delete(ctx.from.id);
-    ctx.reply('⏭ Пропущено. Задавай новый вопрос.');
+    await ctx.reply('⏭ Пропущено. Задавай новый вопрос.');
   });
 
   // Inline button: Send — save AI answer to KB as-is
