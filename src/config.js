@@ -25,6 +25,9 @@ module.exports = {
     databaseId: 2,
     timeoutMs: 15000,
   },
+  max: {
+    botToken: process.env.MAX_BOT_TOKEN,
+  },
   sheets: {
     credentials: process.env.GOOGLE_SHEETS_CREDENTIALS,
     sheetId: process.env.GOOGLE_SHEET_ID,

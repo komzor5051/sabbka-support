@@ -25,15 +25,20 @@ async function checkDbAvailable() {
   return dbAvailable;
 }
 
+// Composite key for the in-memory dialogs map — avoids tg/max userId collisions
+function dialogKey(platform, userId) {
+  return `${platform}:${userId}`;
+}
+
 class DialogTracker {
   constructor({ onDialogComplete }) {
-    // Map<number, { messages: Array, timer: NodeJS.Timeout, firstMessageId: number }>
-    this.dialogs = new Map();
+    this.dialogs = new Map(); // key = "platform:userId" → { messages, timer, firstMessageId, userId, platform }
     this.onDialogComplete = onDialogComplete;
   }
 
-  async addMessage(userId, { text, sender, messageId, date }) {
-    let dialog = this.dialogs.get(userId);
+  async addMessage(platform, userId, { text, sender, messageId, date }) {
+    const key = dialogKey(platform, userId);
+    let dialog = this.dialogs.get(key);
 
     if (!dialog) {
       dialog = {
@@ -41,18 +46,19 @@ class DialogTracker {
         timer: null,
         firstMessageId: messageId,
         userId,
+        platform,
       };
-      this.dialogs.set(userId, dialog);
+      this.dialogs.set(key, dialog);
     }
 
     const msgDate = date || new Date();
     dialog.messages.push({ sender, text, date: msgDate });
 
-    // Persist to DB (non-blocking, non-fatal)
     if (await checkDbAvailable()) {
       supabase
         .from('dialog_buffer')
         .insert({
+          platform,
           user_id: userId,
           sender,
           text,
@@ -60,33 +66,26 @@ class DialogTracker {
           message_date: msgDate.toISOString(),
         })
         .then(({ error }) => {
-          if (error) logger.error('dialog-tracker: DB insert failed', { userId, error: error.message });
+          if (error) logger.error('dialog-tracker: DB insert failed', { platform, userId, error: error.message });
         })
         .catch((err) => {
-          logger.error('dialog-tracker: DB insert threw', { userId, error: err.message });
+          logger.error('dialog-tracker: DB insert threw', { platform, userId, error: err.message });
         });
     }
 
-    // Reset the 5-min timer
-    if (dialog.timer) {
-      clearTimeout(dialog.timer);
-    }
-
+    if (dialog.timer) clearTimeout(dialog.timer);
     dialog.timer = setTimeout(() => {
-      this._completeDialog(userId);
+      this._completeDialog(platform, userId);
     }, config.dialogTimeoutMs);
 
-    logger.info('Message buffered', {
-      userId,
-      sender,
-      msgCount: dialog.messages.length,
-    });
+    logger.info('Message buffered', { platform, userId, sender, msgCount: dialog.messages.length });
   }
 
-  async _completeDialog(userId) {
-    const dialog = this.dialogs.get(userId);
+  async _completeDialog(platform, userId) {
+    const key = dialogKey(platform, userId);
+    const dialog = this.dialogs.get(key);
     if (!dialog || dialog.messages.length === 0) {
-      this.dialogs.delete(userId);
+      this.dialogs.delete(key);
       return;
     }
 
@@ -95,29 +94,31 @@ class DialogTracker {
       .join('\n');
 
     logger.info('Dialog complete', {
+      platform,
       userId,
       messageCount: dialog.messages.length,
       firstMessageId: dialog.firstMessageId,
     });
 
     clearTimeout(dialog.timer);
-    this.dialogs.delete(userId);
+    this.dialogs.delete(key);
 
-    // Clean up DB buffer for this user
     if (await checkDbAvailable()) {
       supabase
         .from('dialog_buffer')
         .delete()
+        .eq('platform', platform)
         .eq('user_id', userId)
         .then(({ error }) => {
-          if (error) logger.error('dialog-tracker: DB cleanup failed', { userId, error: error.message });
+          if (error) logger.error('dialog-tracker: DB cleanup failed', { platform, userId, error: error.message });
         })
         .catch((err) => {
-          logger.error('dialog-tracker: DB cleanup threw', { userId, error: err.message });
+          logger.error('dialog-tracker: DB cleanup threw', { platform, userId, error: err.message });
         });
     }
 
     return this.onDialogComplete({
+      platform,
       userId,
       firstMessageId: dialog.firstMessageId,
       fullDialog,
@@ -127,7 +128,6 @@ class DialogTracker {
 
   /**
    * Recover orphaned dialogs from DB after restart.
-   * Finds buffered messages older than dialogTimeoutMs and processes them.
    */
   async recoverOrphaned() {
     if (!(await checkDbAvailable())) return;
@@ -136,40 +136,43 @@ class DialogTracker {
       const cutoff = new Date(Date.now() - config.dialogTimeoutMs).toISOString();
       const { data, error } = await supabase
         .from('dialog_buffer')
-        .select('user_id, sender, text, message_id, message_date')
+        .select('platform, user_id, sender, text, message_id, message_date')
         .lt('created_at', cutoff)
         .order('created_at');
 
       if (error || !data || data.length === 0) return;
 
-      // Group by user_id
-      const byUser = new Map();
+      // Group by (platform, user_id)
+      const byKey = new Map();
       for (const row of data) {
-        if (!byUser.has(row.user_id)) byUser.set(row.user_id, []);
-        byUser.get(row.user_id).push(row);
+        const platform = row.platform || 'tg';
+        const key = dialogKey(platform, row.user_id);
+        if (!byKey.has(key)) byKey.set(key, { platform, userId: row.user_id, messages: [] });
+        byKey.get(key).messages.push(row);
       }
 
-      logger.info('dialog-tracker: recovering orphaned dialogs', { users: byUser.size, messages: data.length });
+      logger.info('dialog-tracker: recovering orphaned dialogs', { keys: byKey.size, messages: data.length });
 
-      for (const [userId, messages] of byUser) {
-        const fullDialog = messages
+      for (const [, group] of byKey) {
+        const fullDialog = group.messages
           .map(m => `[${m.sender}]: ${m.text}`)
           .join('\n');
 
         await this.onDialogComplete({
-          userId,
-          firstMessageId: messages[0].message_id,
+          platform: group.platform,
+          userId: group.userId,
+          firstMessageId: group.messages[0].message_id,
           fullDialog,
-          messageCount: messages.length,
+          messageCount: group.messages.length,
         }).catch(err => {
-          logger.error('dialog-tracker: recovery failed for user', { userId, error: err.message });
+          logger.error('dialog-tracker: recovery failed for user', { platform: group.platform, userId: group.userId, error: err.message });
         });
 
-        // Clean up recovered messages
         await supabase
           .from('dialog_buffer')
           .delete()
-          .eq('user_id', userId);
+          .eq('platform', group.platform)
+          .eq('user_id', group.userId);
       }
 
       logger.info('dialog-tracker: recovery complete');
@@ -179,9 +182,9 @@ class DialogTracker {
   }
 
   async flushAll() {
-    const userIds = [...this.dialogs.keys()];
-    await Promise.allSettled(userIds.map(userId => this._completeDialog(userId)));
-    logger.info(`Flushed ${userIds.length} pending dialogs`);
+    const entries = [...this.dialogs.values()];
+    await Promise.allSettled(entries.map(d => this._completeDialog(d.platform, d.userId)));
+    logger.info(`Flushed ${entries.length} pending dialogs`);
   }
 
   get pendingCount() {
