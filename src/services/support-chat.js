@@ -372,9 +372,10 @@ async function _handle(ctx, msg, bot) {
   // 4. Select model (Grok 4.1 Fast for tool calling + agentic support)
   const model = config.openrouter.models.chat;
 
-  // 5. Call OpenRouter — with tools if Metabase configured
-  const toolsEnabled = !!config.metabase.apiKey;
-  const tools = toolsEnabled ? [TOOL_LOOKUP_ACCOUNT] : undefined;
+  // 5. Call OpenRouter — tools DISABLED for customer flow (privacy).
+  // Account lookup is admin-only (see admin-chat.js). Customers get RAG + KB + escalation only.
+  const toolsEnabled = false;
+  const tools = undefined;
 
   logger.info('support-chat: step 5 — calling AI', { userId, model, toolsEnabled });
   let aiResponse = await ai.chatCompletion(model, messages, {
