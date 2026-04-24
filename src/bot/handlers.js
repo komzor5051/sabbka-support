@@ -1,4 +1,3 @@
-const { Markup } = require('telegraf');
 const logger = require('../utils/logger');
 const config = require('../config');
 const ai = require('../services/ai');
@@ -8,39 +7,18 @@ const escalationStore = require('../services/escalation-store');
 const adminChat = require('../services/admin-chat');
 const adminHistory = require('../services/admin-history');
 
-// ─────────────────────────────────────────────────────────────
-// Reply keyboard — main menu shortcuts (always visible)
-// ─────────────────────────────────────────────────────────────
+const HELP_TEXT = `Я — AI-ассистент оператора SABKA.
 
-const MAIN_MENU = Markup.keyboard([
-  ['📊 Метрики', '⚠️ Эскалации'],
-  ['🔍 Найти юзера', '📚 Поиск в KB'],
-  ['🧹 Очистить чат', '❓ Помощь'],
-]).resize().persistent();
+Что ты можешь:
+— Дать email юзера (напиши его в любом виде) → покажу тариф, токены, подписку, платежи с ценами и проверю ошибки в БД.
+— Спросить про саму SABKA (тарифы, фичи, возвраты, чанки) → отвечу из базы знаний.
+— Спросить смешанное («почему у X@Y.ru не списалось?») → совмещу данные юзера и знание про механику.
 
-// Button labels that route to AI with a predefined prompt
-const MENU_PROMPTS = {
-  '📊 Метрики': 'покажи метрики за сегодня',
-  '⚠️ Эскалации': 'покажи эскалации за последние 24 часа',
-  '🔍 Найти юзера': 'давай найдём юзера. Напиши какой email?',
-  '📚 Поиск в KB': 'что искать в базе знаний? Напиши запрос.',
-};
+Команды:
+/clear — стереть историю нашего чата (чтобы я забыл предыдущие разговоры).
+/help — показать эту справку.
 
-const HELP_TEXT = `Я — AI-ассистент оператора SABKA. Инструменты:
-
-👤 lookup — данные аккаунта по email (тариф, токены, подписка)
-💳 payments — список платежей с суммами и статусами
-⚠️ diagnostics — проверка ошибок биллинга/подписки
-📚 search_kb — поиск по базе прошлых диалогов
-🆘 escalations — последние эскалации к человеку
-💬 dialogs — история переписки юзера с ботом
-📊 metrics — метрики за сегодня
-
-Можно писать свободным текстом — сам разберусь какой инструмент позвать. Пиши как коллеге.
-
-Чтобы ответить юзеру из эскалации — сделай reply на сообщение от бота с 🆘. Ответ уйдёт юзеру, а пара вопрос+ответ сохранится в KB.
-
-/clear — очистить историю нашего чата (справа меню 🧹 то же самое)`;
+Чтобы ответить юзеру из эскалации — сделай reply на сообщение бота с 🆘. Ответ уйдёт юзеру и сохранится в KB.`;
 
 // ─────────────────────────────────────────────────────────────
 // Self-learning: save operator's reply as high-quality KB entry
@@ -86,31 +64,15 @@ async function handleAdminText(ctx) {
   if (!text || text.startsWith('/')) return;
   const adminId = ctx.from.id;
 
-  // Menu button: clear — handled directly, no AI
-  if (text === '🧹 Очистить чат') {
-    const ok = await adminHistory.clearHistory(adminId);
-    await ctx.reply(ok ? '🧹 История очищена.' : '⚠️ Не удалось очистить.', MAIN_MENU);
-    return;
-  }
-
-  // Menu button: help — handled directly
-  if (text === '❓ Помощь') {
-    await ctx.reply(HELP_TEXT, MAIN_MENU);
-    return;
-  }
-
-  // Menu buttons with predefined prompt → rewrite text and send to AI
-  const effectiveText = MENU_PROMPTS[text] || text;
-
   await ctx.sendChatAction('typing').catch(() => {});
 
   try {
-    await adminChat.handle(adminId, effectiveText, async (replyText) => {
-      await ctx.reply(replyText || '⚠️ Пустой ответ.', MAIN_MENU);
+    await adminChat.handle(adminId, text, async (replyText) => {
+      await ctx.reply(replyText || '⚠️ Пустой ответ.');
     });
   } catch (err) {
     logger.error('admin-chat: handler threw', { adminId, error: err.message, stack: err.stack });
-    await ctx.reply(`⚠️ Ошибка: ${err.message}`, MAIN_MENU);
+    await ctx.reply(`⚠️ Ошибка: ${err.message}`);
   }
 }
 
@@ -135,11 +97,11 @@ async function handleAdminVoice(ctx) {
     await ctx.sendChatAction('typing').catch(() => {});
 
     await adminChat.handle(adminId, transcription, async (replyText) => {
-      await ctx.reply(replyText || '⚠️ Пустой ответ.', MAIN_MENU);
+      await ctx.reply(replyText || '⚠️ Пустой ответ.');
     });
   } catch (err) {
     logger.error('admin-voice: failed', { adminId, error: err.message });
-    await ctx.reply(`⚠️ Ошибка: ${err.message}`, MAIN_MENU);
+    await ctx.reply(`⚠️ Ошибка: ${err.message}`);
   }
 }
 
@@ -188,19 +150,16 @@ function setupHandlers(bot) {
 
   // 2. Commands (admin-only) — must come BEFORE generic text handler
   bot.command('start', authMiddleware, async (ctx) => {
-    await ctx.reply(
-      `Привет! Я AI-ассистент оператора SABKA — диспетчерская для тебя.\n\n` + HELP_TEXT,
-      MAIN_MENU
-    );
+    await ctx.reply(`Привет! Я AI-ассистент оператора SABKA.\n\n` + HELP_TEXT);
   });
 
   bot.command('help', authMiddleware, async (ctx) => {
-    await ctx.reply(HELP_TEXT, MAIN_MENU);
+    await ctx.reply(HELP_TEXT);
   });
 
   bot.command('clear', authMiddleware, async (ctx) => {
     const ok = await adminHistory.clearHistory(ctx.from.id);
-    await ctx.reply(ok ? '🧹 История очищена.' : '⚠️ Не удалось очистить.', MAIN_MENU);
+    await ctx.reply(ok ? '🧹 История стёрта. Я забыл всё что мы обсуждали.' : '⚠️ Не удалось очистить.');
   });
 
   // 3. Voice/audio from admin → transcribe → AI
