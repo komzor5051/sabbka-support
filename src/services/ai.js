@@ -29,8 +29,17 @@ async function fetchWithRetry(url, options, maxRetries = 3) {
   }
 }
 
-async function chatCompletion(model, messages, { temperature = 0.3, maxTokens = 1024 } = {}) {
+async function chatCompletion(model, messages, { temperature = 0.3, maxTokens = 1024, tools, toolChoice } = {}) {
   const start = Date.now();
+
+  const body = {
+    model,
+    messages,
+    temperature,
+    max_tokens: maxTokens,
+  };
+  if (tools && tools.length > 0) body.tools = tools;
+  if (toolChoice) body.tool_choice = toolChoice;
 
   const res = await fetchWithRetry(`${OPENROUTER_BASE}/chat/completions`, {
     method: 'POST',
@@ -38,12 +47,7 @@ async function chatCompletion(model, messages, { temperature = 0.3, maxTokens = 
       'Authorization': `Bearer ${API_KEY}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature,
-      max_tokens: maxTokens,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
@@ -62,6 +66,7 @@ async function chatCompletion(model, messages, { temperature = 0.3, maxTokens = 
     prompt_tokens: usage.prompt_tokens,
     completion_tokens: usage.completion_tokens,
     elapsed_ms: elapsed,
+    has_tools: !!tools,
   });
 
   if (!data.choices || !data.choices[0] || !data.choices[0].message) {
@@ -69,7 +74,12 @@ async function chatCompletion(model, messages, { temperature = 0.3, maxTokens = 
     throw new Error('OpenRouter returned empty choices');
   }
 
-  return data.choices[0].message.content;
+  const msg = data.choices[0].message;
+  return {
+    content: msg.content || '',
+    tool_calls: msg.tool_calls || null,
+    finish_reason: data.choices[0].finish_reason,
+  };
 }
 
 // ~7000 tokens ≈ 14000 chars for Russian (2 chars/token average for Cyrillic)
@@ -129,16 +139,16 @@ ${rulesText}
 Диалог:
 ${fullDialog}`;
 
-  const result = await chatCompletion(
-    config.openrouter.models.gemini,
+  const { content } = await chatCompletion(
+    config.openrouter.models.analyzer,
     [{ role: 'user', content: prompt }],
     { temperature: 0.1, maxTokens: 2048 }
   );
 
   try {
-    return JSON.parse(result.replace(/```json?\n?/g, '').replace(/```/g, '').trim());
+    return JSON.parse(content.replace(/```json?\n?/g, '').replace(/```/g, '').trim());
   } catch (e) {
-    logger.error('Failed to parse AI analysis', { result });
+    logger.error('Failed to parse AI analysis', { result: content });
     return {
       summary_problem: 'Не удалось определить',
       summary_solution: 'Не удалось определить',
@@ -169,19 +179,20 @@ ${casesText}
 
 Напиши готовый ответ пользователю. Будь дружелюбным, конкретным, без воды. Если кейсы не очень релевантны — честно скажи.`;
 
-  return chatCompletion(
-    config.openrouter.models.gemini,
+  const { content } = await chatCompletion(
+    config.openrouter.models.analyzer,
     [{ role: 'user', content: prompt }],
     { temperature, maxTokens: 512 }
   );
+  return content;
 }
 
 async function transcribeVoice(audioBuffer) {
   const base64 = audioBuffer.toString('base64');
 
   // Gemini via OpenRouter accepts inline_data format for audio
-  return chatCompletion(
-    config.openrouter.models.gemini,
+  const { content } = await chatCompletion(
+    config.openrouter.models.analyzer,
     [{
       role: 'user',
       content: [
@@ -196,6 +207,7 @@ async function transcribeVoice(audioBuffer) {
     }],
     { temperature: 0.1, maxTokens: 2048 }
   );
+  return content;
 }
 
 module.exports = {
