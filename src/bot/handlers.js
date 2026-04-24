@@ -1,3 +1,4 @@
+const { Markup } = require('telegraf');
 const logger = require('../utils/logger');
 const config = require('../config');
 const ai = require('../services/ai');
@@ -7,6 +8,11 @@ const escalationStore = require('../services/escalation-store');
 const adminChat = require('../services/admin-chat');
 const adminHistory = require('../services/admin-history');
 
+// Persistent keyboard — one button only: start fresh chat (clear history).
+// Useful when switching between users so old context doesn't leak in.
+const MAIN_MENU = Markup.keyboard([['💬 Новый чат']]).resize().persistent();
+const NEW_CHAT_BTN = '💬 Новый чат';
+
 const HELP_TEXT = `Я — AI-ассистент оператора SABKA.
 
 Что ты можешь:
@@ -14,8 +20,10 @@ const HELP_TEXT = `Я — AI-ассистент оператора SABKA.
 — Спросить про саму SABKA (тарифы, фичи, возвраты, чанки) → отвечу из базы знаний.
 — Спросить смешанное («почему у X@Y.ru не списалось?») → совмещу данные юзера и знание про механику.
 
+Кнопка 💬 Новый чат — обнулить историю, если надо переключиться на другого юзера и не путать контекст.
+
 Команды:
-/clear — стереть историю нашего чата (чтобы я забыл предыдущие разговоры).
+/clear — то же самое что кнопка 💬 Новый чат.
 /help — показать эту справку.
 
 Чтобы ответить юзеру из эскалации — сделай reply на сообщение бота с 🆘. Ответ уйдёт юзеру и сохранится в KB.`;
@@ -64,15 +72,26 @@ async function handleAdminText(ctx) {
   if (!text || text.startsWith('/')) return;
   const adminId = ctx.from.id;
 
+  // "Новый чат" button — wipe history, bot forgets previous context
+  if (text === NEW_CHAT_BTN) {
+    const ok = await adminHistory.clearHistory(adminId);
+    await ctx.reply(
+      ok ? '💬 Новый чат. Я забыл всё что мы обсуждали до этого. Спрашивай.'
+         : '⚠️ Не удалось очистить историю.',
+      MAIN_MENU
+    );
+    return;
+  }
+
   await ctx.sendChatAction('typing').catch(() => {});
 
   try {
     await adminChat.handle(adminId, text, async (replyText) => {
-      await ctx.reply(replyText || '⚠️ Пустой ответ.');
+      await ctx.reply(replyText || '⚠️ Пустой ответ.', MAIN_MENU);
     });
   } catch (err) {
     logger.error('admin-chat: handler threw', { adminId, error: err.message, stack: err.stack });
-    await ctx.reply(`⚠️ Ошибка: ${err.message}`);
+    await ctx.reply(`⚠️ Ошибка: ${err.message}`, MAIN_MENU);
   }
 }
 
@@ -97,11 +116,11 @@ async function handleAdminVoice(ctx) {
     await ctx.sendChatAction('typing').catch(() => {});
 
     await adminChat.handle(adminId, transcription, async (replyText) => {
-      await ctx.reply(replyText || '⚠️ Пустой ответ.');
+      await ctx.reply(replyText || '⚠️ Пустой ответ.', MAIN_MENU);
     });
   } catch (err) {
     logger.error('admin-voice: failed', { adminId, error: err.message });
-    await ctx.reply(`⚠️ Ошибка: ${err.message}`);
+    await ctx.reply(`⚠️ Ошибка: ${err.message}`, MAIN_MENU);
   }
 }
 
@@ -150,16 +169,19 @@ function setupHandlers(bot) {
 
   // 2. Commands (admin-only) — must come BEFORE generic text handler
   bot.command('start', authMiddleware, async (ctx) => {
-    await ctx.reply(`Привет! Я AI-ассистент оператора SABKA.\n\n` + HELP_TEXT);
+    await ctx.reply(`Привет! Я AI-ассистент оператора SABKA.\n\n` + HELP_TEXT, MAIN_MENU);
   });
 
   bot.command('help', authMiddleware, async (ctx) => {
-    await ctx.reply(HELP_TEXT);
+    await ctx.reply(HELP_TEXT, MAIN_MENU);
   });
 
   bot.command('clear', authMiddleware, async (ctx) => {
     const ok = await adminHistory.clearHistory(ctx.from.id);
-    await ctx.reply(ok ? '🧹 История стёрта. Я забыл всё что мы обсуждали.' : '⚠️ Не удалось очистить.');
+    await ctx.reply(
+      ok ? '💬 Новый чат. Я забыл всё что мы обсуждали.' : '⚠️ Не удалось очистить.',
+      MAIN_MENU
+    );
   });
 
   // 3. Voice/audio from admin → transcribe → AI
